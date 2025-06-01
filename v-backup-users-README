@@ -1,0 +1,39 @@
+# MyVestaCP Backup Setup with RCLONE and Backblaze
+
+This guide outlines how to set up automated backups on MyVestaCP with RCLONE to sync backups to Backblaze, optimized for a fresh Debian 12.9 installation. This approach replaces the method shared in 2020 on the MyVestaCP forum: https://forum.myvestacp.com/viewtopic.php?t=275.
+
+## Setup Instructions
+
+1. **Log into the Admin Panel**: Access your MyVestaCP admin panel.
+2. **Access the Backup Section**: Navigate to the "Server" section and click on "Configure".
+3. **Enable Local Backup**: In the backup section, set "Local Backup" to "Yes" to enable local backups before cloud syncing.
+4. **Configure Backup Schedule**: Edit the cron job for `v-backup-users` in the cron tab to set your desired backup frequency.
+5. **Set Up Backblaze**:
+   - Log into your Backblaze panel.
+   - Create a bucket.
+   - Generate Application Keys, ensuring they have access to your bucket.
+
+## Installing and Configuring RCLONE
+
+1. **Install RCLONE**:
+   SSH into your server as root and run:
+   curl https://rclone.org/install.sh | sudo bash
+
+2. **Configure RCLONE**:
+   Run the following command and follow the prompts to set up RCLONE:
+   rclone config
+   Name the configuration (e.g., "backup-weekly" for weekly backups, or any name you prefer).
+
+## Modify the v-backup-users Script
+
+Edit the `v-backup-users` script located at `/usr/local/vesta/bin/`:
+   sudo nano /usr/local/vesta/bin/v-backup-users
+
+Replace its content with the 'v-backup-users' found here
+
+## Important Note
+
+Update line 23 in the script with your Backblaze bucket name and RCLONE configuration name:
+   remote_base_path="backup-weekly:BUCKETNAME/Backups/$month_year"
+
+Replace `BUCKETNAME` with your actual Backblaze bucket name and `backup-weekly` with the name you chose during RCLONE configuration.
