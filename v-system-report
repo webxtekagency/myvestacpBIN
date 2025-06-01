@@ -1504,7 +1504,10 @@ check_php_status() {
             stuck_processes=$(echo "$stuck_processes" | tr -d ' \n' | grep -o '^[0-9]*' || echo "0")
             if [ "$stuck_processes" -gt 0 ] 2>/dev/null; then
                 echo -e "${YELLOW}  * Potentially stuck processes: $stuck_processes${NC}"
-                ((performance_issues++))
+                # Only count stuck processes as half a performance issue since they're not critical
+                if [ "$stuck_processes" -gt 5 ]; then
+                    ((performance_issues++))  # Only count if more than 5 stuck processes
+                fi
             fi
         fi
         local log_file="/var/log/php${version}-fpm.log"
@@ -2087,52 +2090,93 @@ check_clamav_status() {
         fi
     fi
     if $freshclam_running; then
-        local db_info=$(run_with_timeout 5 "freshclam --version 2>/dev/null | grep 'Database'")
-        if [ -n "$db_info" ]; then
-            database_date=$(echo "$db_info" | grep -oP '(?<=Database updated: ).*')
-            if [ -n "$database_date" ]; then
-                output+=("${GREEN}✓ Database updated: $database_date${NC}")
-                local db_timestamp=$(date -d "$database_date" +%s 2>/dev/null)
-                if [ -n "$db_timestamp" ]; then
-                    local current_timestamp=$(date +%s)
-                    database_age_days=$(( (current_timestamp - db_timestamp) / 86400 ))
-                    if [ "$database_age_days" -gt 7 ]; then
-                        output+=("${RED}⚠️  Database is $database_age_days days old (outdated)${NC}")
-                        ((current_medium_issues++))
-                    elif [ "$database_age_days" -gt 1 ]; then
-                        output+=("${YELLOW}⚠️  Database is $database_age_days days old${NC}")
-                    fi
-        fi
-    else
-                local status_output=$(run_with_timeout 5 "systemctl status clamav-freshclam 2>/dev/null | grep 'database is up-to-date' | tail -n 1")
-                if [ -n "$status_output" ]; then
-                    database_date=$(echo "$status_output" | sed -n 's/.*\([A-Z][a-z][a-z] [A-Z][a-z][a-z] [0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] [0-9][0-9][0-9][0-9]\).*/\1/p')
-                    if [ -n "$database_date" ]; then
-                        output+=("${GREEN}✓ Database last checked: $database_date${NC}")
-                        local db_timestamp=$(date -d "$database_date" +%s 2>/dev/null)
-                        if [ -n "$db_timestamp" ]; then
-                            local current_timestamp=$(date +%s)
-                            database_age_days=$(( (current_timestamp - db_timestamp) / 86400 ))
-                            if [ "$database_age_days" -gt 7 ]; then
-                                output+=("${RED}⚠️  Database check is $database_age_days days old (outdated)${NC}")
-        ((current_medium_issues++))
-                            elif [ "$database_age_days" -gt 1 ]; then
-                                output+=("${YELLOW}⚠️  Database check is $database_age_days days old${NC}")
+        # Try using sigtool to get database info (modern ClamAV)
+        local daily_db_info=""
+        if command -v sigtool >/dev/null 2>&1; then
+            # Try multiple database file locations
+            local db_locations=(
+                "/var/lib/clamav/daily.cvd"
+                "/var/lib/clamav/daily.cld"
+                "/usr/share/clamav/daily.cvd"
+                "/usr/share/clamav/daily.cld"
+                "/usr/local/share/clamav/daily.cvd"
+                "/usr/local/share/clamav/daily.cld"
+            )
+            
+            for db_file in "${db_locations[@]}"; do
+                if [ -f "$db_file" ]; then
+                    daily_db_info=$(run_with_timeout 5 "sigtool --info=\"$db_file\" 2>/dev/null | grep 'Build time:'")
+                    if [ -n "$daily_db_info" ]; then
+                        database_date=$(echo "$daily_db_info" | sed -n 's/Build time: \(.*\)/\1/p' | sed 's/ UTC//')
+                        if [ -n "$database_date" ]; then
+                            output+=("${GREEN}✓ Database build time: $database_date${NC}")
+                            local db_timestamp=$(date -d "$database_date" +%s 2>/dev/null)
+                            if [ -n "$db_timestamp" ]; then
+                                local current_timestamp=$(date +%s)
+                                database_age_days=$(( (current_timestamp - db_timestamp) / 86400 ))
+                                if [ "$database_age_days" -gt 7 ]; then
+                                    output+=("${RED}⚠️  Database is $database_age_days days old (outdated)${NC}")
+                                    ((current_medium_issues++))
+                                elif [ "$database_age_days" -gt 1 ]; then
+                                    output+=("${YELLOW}⚠️  Database is $database_age_days days old${NC}")
+                                fi
                             fi
+                            break
                         fi
-                    else
-                        output+=("${YELLOW}⚠️  Unable to parse database update date from status${NC}")
-                        ((current_medium_issues++))
                     fi
-                else
-                    output+=("${YELLOW}⚠️  Unable to retrieve database update information from status${NC}")
-                    ((current_medium_issues++))
                 fi
+            done
+        fi
+        
+        # Fallback: try freshclam logs for update information
+        if [ -z "$database_date" ] && [ -f "/var/log/clamav/freshclam.log" ]; then
+            local last_update_line=$(run_with_timeout 5 "grep -E '(updated|downloaded).*database' /var/log/clamav/freshclam.log 2>/dev/null | tail -n 1")
+            if [ -n "$last_update_line" ]; then
+                database_date=$(echo "$last_update_line" | grep -o '^[A-Za-z]\{3\} [A-Za-z]\{3\} [0-9]\{1,2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\} [0-9]\{4\}' 2>/dev/null)
+                if [ -n "$database_date" ]; then
+                    output+=("${GREEN}✓ Last database update (from logs): $database_date${NC}")
+                    local db_timestamp=$(date -d "$database_date" +%s 2>/dev/null)
+                    if [ -n "$db_timestamp" ]; then
+                        local current_timestamp=$(date +%s)
+                        database_age_days=$(( (current_timestamp - db_timestamp) / 86400 ))
+                        if [ "$database_age_days" -gt 7 ]; then
+                            output+=("${RED}⚠️  Database update is $database_age_days days old (outdated)${NC}")
+                            ((current_medium_issues++))
+                        elif [ "$database_age_days" -gt 1 ]; then
+                            output+=("${YELLOW}⚠️  Database update is $database_age_days days old${NC}")
+                        fi
+                    fi
+                fi
+            fi
+        fi
+        
+        # Second fallback: try systemctl status for freshclam
+        if [ -z "$database_date" ]; then
+            local status_output=$(run_with_timeout 5 "systemctl status clamav-freshclam 2>/dev/null | grep 'database is up-to-date' | tail -n 1")
+            if [ -n "$status_output" ]; then
+                database_date=$(echo "$status_output" | sed -n 's/.*\([A-Z][a-z][a-z] [A-Z][a-z][a-z] [0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] [0-9][0-9][0-9][0-9]\).*/\1/p')
+                if [ -n "$database_date" ]; then
+                    output+=("${GREEN}✓ Database last checked: $database_date${NC}")
+                    local db_timestamp=$(date -d "$database_date" +%s 2>/dev/null)
+                    if [ -n "$db_timestamp" ]; then
+                        local current_timestamp=$(date +%s)
+                        database_age_days=$(( (current_timestamp - db_timestamp) / 86400 ))
+                        if [ "$database_age_days" -gt 7 ]; then
+                            output+=("${RED}⚠️  Database check is $database_age_days days old (outdated)${NC}")
+                            ((current_medium_issues++))
+                        elif [ "$database_age_days" -gt 1 ]; then
+                            output+=("${YELLOW}⚠️  Database check is $database_age_days days old${NC}")
+                        fi
+                    fi
+                fi
+            else
+                output+=("${YELLOW}⚠️  Unable to retrieve database update information from status${NC}")
+                ((current_medium_issues++))
+            fi
         fi
     else
-            output+=("${YELLOW}⚠️  Unable to retrieve database information from freshclam${NC}")
-            ((current_medium_issues++))
-        fi
+        output+=("${YELLOW}⚠️  Unable to retrieve database information from freshclam${NC}")
+        ((current_medium_issues++))
     fi
     if [ -z "$database_date" ]; then
         local db_file=""
