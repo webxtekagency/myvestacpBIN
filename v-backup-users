@@ -1,0 +1,140 @@
+#!/bin/bash
+
+scriptname="v-backup-users"
+for pid in $(pidof -x "$scriptname"); do
+    if [ $pid != $$ ]; then
+        echo "[$(date)] : $scriptname : Process is already running with PID $pid" | tee -a $log
+        exit 1
+    fi
+done
+
+source /etc/profile
+source $VESTA/func/main.sh
+source $VESTA/conf/vesta.conf
+
+ALLOW_MYSQL_REPAIR=1
+if [ $# -ge 1 ]; then
+    ALLOW_MYSQL_REPAIR=$1
+fi
+
+log=$VESTA/log/backup.log
+summary=$VESTA/log/backup_summary.log
+month_year=$(date +"%B-%Y" | tr ' ' '-')
+remote_base_path="backup-weekly:x078-WEEKLY/Backups/$month_year"
+
+NOTIFY_ADMIN_FULL_BACKUP=$(grep CONTACT $VESTA/data/users/admin/user.conf | cut -f 2 -d \')
+
+if [ -z "$NOTIFY_ADMIN_FULL_BACKUP" ]; then
+    echo "[$(date)] : Admin email not configured. Exiting." | tee -a $log
+    exit 1
+fi
+
+touch $log
+mv $log $log-$(date +"%Y-%m-%d--%H:%M:%S")
+touch $summary
+echo "Backup Summary - $(date)" > $summary
+echo "=====================" >> $summary
+
+if [ -d "/backup" ]; then
+    find /backup -mindepth 1 -delete
+    echo "[$(date)] : Directory /backup cleaned before starting the backup process." | tee -a $log
+else
+    mkdir -p /backup
+    echo "[$(date)] : Directory /backup created." | tee -a $log
+fi
+
+if [ $ALLOW_MYSQL_REPAIR -eq 1 ]; then
+    echo "[$(date)] : Database repair started." | tee -a $log
+    nice -n 19 ionice -c 3 mysqlrepair --all-databases --check --auto-repair | tee -a $log 2>&1
+fi
+
+FINAL_STATUS='SUCCESS'
+SUCCESS_USERS=()
+FAILED_USERS=()
+
+for user in $(grep '@' /etc/passwd | cut -f1 -d:); do
+    if [ ! -f "$VESTA/data/users/$user/user.conf" ]; then
+        continue
+    fi
+    check_suspend=$(grep "SUSPENDED='no'" $VESTA/data/users/$user/user.conf)
+    if [ ! -z "$check_suspend" ]; then
+        echo "[$(date)] : Starting backup for user $user." | tee -a $log
+        nice -n 19 ionice -c 3 $BIN/v-backup-user $user | tee -a $log 2>&1
+        STATUS=$?
+        if [ $STATUS -ne 0 ]; then
+            echo "[$(date)] : Error creating backup for user $user." | tee -a $log
+            FINAL_STATUS='CONTAINS ERRORS !!!'
+            FAILED_USERS+=("$user")
+            continue
+        fi
+        user_backup_files=$(ls /backup | grep "^$user\..*")
+        user_remote_path="$remote_base_path/$user"
+        for backup_file in $user_backup_files; do
+            echo "[$(date)] : Uploading $backup_file to $user_remote_path on Backblaze." | tee -a $log
+            rclone copy "/backup/$backup_file" "$user_remote_path/" | tee -a $log 2>&1
+            if [ $? -ne 0 ]; then
+                echo "[$(date)] : Error uploading $backup_file to Backblaze." | tee -a $log
+                FINAL_STATUS='CONTAINS ERRORS !!!'
+                FAILED_USERS+=("$user")
+            else
+                rm -f "/backup/$backup_file"
+                echo "[$(date)] : $backup_file uploaded and removed locally." | tee -a $log
+                SUCCESS_USERS+=("$user")
+            fi
+        done
+    fi
+done
+
+if [ "$FINAL_STATUS" = "SUCCESS" ]; then
+    find /backup -mindepth 1 -delete
+    echo "[$(date)] : Process completed successfully. Directory /backup cleaned." | tee -a $log
+else
+    echo "[$(date)] : Errors occurred during the process. Directory /backup was not cleaned." | tee -a $log
+fi
+
+echo "Backup Summary" >> $summary
+echo "=====================" >> $summary
+echo "Overall Status: $FINAL_STATUS" >> $summary
+echo "" >> $summary
+echo "Successful Backups:" >> $summary
+if [ ${#SUCCESS_USERS[@]} -eq 0 ]; then
+    echo "  - None" >> $summary
+else
+    for user in "${SUCCESS_USERS[@]}"; do
+        echo "  - $user" >> $summary
+    done
+fi
+echo "" >> $summary
+echo "Failed Backups:" >> $summary
+if [ ${#FAILED_USERS[@]} -eq 0 ]; then
+    echo "  - None" >> $summary
+else
+    for user in "${FAILED_USERS[@]}"; do
+        echo "  - $user" >> $summary
+    done
+fi
+
+email_subject="Backup Summary Report for $HOSTNAME"
+log_attachment="/tmp/backup_log_$(date +"%Y-%m-%d_%H-%M-%S").log"
+cp $log $log_attachment
+
+(
+    echo "Subject: $email_subject"
+    echo "MIME-Version: 1.0"
+    echo "Content-Type: multipart/mixed; boundary=\"boundary\""
+    echo
+    echo "--boundary"
+    echo "Content-Type: text/plain; charset=UTF-8"
+    echo
+    cat $summary
+    echo "--boundary"
+    echo "Content-Type: text/plain; name=$(basename $log_attachment)"
+    echo "Content-Disposition: attachment; filename=$(basename $log_attachment)"
+    echo
+    cat $log_attachment
+    echo "--boundary--"
+) | /usr/sbin/sendmail "$NOTIFY_ADMIN_FULL_BACKUP"
+
+rm -f $log_attachment
+
+exit
