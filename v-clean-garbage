@@ -1,0 +1,65 @@
+#!/bin/bash
+
+scriptname="v-clean-garbage"
+for pid in $(pidof -x "$scriptname"); do
+    if [ $pid != $$ ]; then
+        echo "[$(date)] : $scriptname : Process is already running with PID $pid"
+        exit 1
+    fi
+done
+
+source /etc/profile
+source /usr/local/vesta/func/main.sh
+source /usr/local/vesta/conf/vesta.conf
+
+ADMIN_EMAIL=$(grep 'CONTACT' /usr/local/vesta/data/users/admin/user.conf | cut -f 2 -d \')
+
+summary="Clean Garbage Summary - $(date)\n====================="
+
+convert_space() {
+    local space_kb=$1
+    local space_mb=$(bc <<< "scale=2; $space_kb/1024")
+    local space_gb=$(bc <<< "scale=2; $space_mb/1024")
+
+    if (( $(echo "$space_mb < 1024" | bc -l) )); then
+        printf "%.2f MB\n" $space_mb
+    else
+        printf "%.2f GB\n" $space_gb
+    fi
+}
+
+initial_space_kb=$(df / | grep / | awk '{ print $4 }')
+initial_space_formatted=$(convert_space $initial_space_kb)
+summary+="\nInitial Available Space: $initial_space_formatted"
+
+handle_error() {
+    summary+="\n[$(date)] : Error occurred during $1\n[$(date)] : Continuing with the next task..."
+    FINAL_STATUS='FAILED'
+}
+
+journalctl --vacuum-time=3d || handle_error "journalctl cleanup"
+sudo apt-get clean || handle_error "APT cache clean"
+sudo fstrim -av || handle_error "SSD TRIM"
+
+final_space_kb=$(df / | grep / | awk '{ print $4 }')
+final_space_formatted=$(convert_space $final_space_kb)
+summary+="\nFinal Available Space: $final_space_formatted"
+
+cleaned_space_kb=$((initial_space_kb - final_space_kb))
+cleaned_space_formatted=$(convert_space $cleaned_space_kb)
+summary+="\nSpace Cleaned: $cleaned_space_formatted"
+
+FINAL_STATUS=${FINAL_STATUS:-SUCCESS}
+
+summary+="\n[$(date)] : Process completed with status: $FINAL_STATUS\nOverall Status: $FINAL_STATUS"
+
+email_subject="Clean Garbage Report for $HOSTNAME - $FINAL_STATUS"
+(
+    echo "Subject: $email_subject"
+    echo "MIME-Version: 1.0"
+    echo "Content-Type: text/plain; charset=UTF-8"
+    echo
+    echo -e "$summary"
+) | /usr/sbin/sendmail "$ADMIN_EMAIL"
+
+exit
