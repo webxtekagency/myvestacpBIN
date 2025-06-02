@@ -2429,91 +2429,240 @@ check_clamav_status() {
     fi
 }
 check_backup_status() {
-    local backup_log="/usr/local/vesta/log/backup_summary.log"
+    local backup_log="/usr/local/vesta/log/backup.log"
+    local backup_summary="/usr/local/vesta/log/backup_summary.log"
     local has_issues=0
     local backup_status=""
+    local detailed_issues=""
+    
     echo -e "Processing backup logs... This may take a few moments."
-    if [ -f "$backup_log" ]; then
-        local log_content=$(run_with_timeout 10 "tail -n 50 '$backup_log' 2>/dev/null | tr -d '\0'")
-        local tail_exit_code=$?
-        if [ $tail_exit_code -ne 0 ]; then
-            backup_status="${RED}⚠️  Failed to read backup log ($tail_exit_code)${NC}"
+    
+    # Check if backup.log exists (most recent backup log)
+    if [ ! -f "$backup_log" ]; then
+        backup_status="${RED}⚠️  Main backup log file not found: $backup_log${NC}"
             ((high_issues++))
-            DETAILED_ISSUES_EMAIL+="<h3 style='color: #dc3545;'>💾 Backup System - Critical Issues</h3><ul style='margin: 10px 0; padding-left: 20px;'><li>Failed to read backup log (exit code: $tail_exit_code)</li></ul>"
+        DETAILED_ISSUES_EMAIL+="<h3 style='color: #dc3545;'>💾 Backup System - Critical Issues</h3><ul style='margin: 10px 0; padding-left: 20px;'><li>Main backup log file not found: $backup_log</li></ul>"
             return 1
         fi
-        local last_summary_date=""
-        local overall_status=""
-        local failed_backups_section=0
-        local individual_failures_found=0
-        local failure_reason=""
-        local reversed_content=$(echo "$log_content" | tac)
-        while IFS= read -r line; do
-            if [[ "$line" =~ Backup[[:space:]]+Summary[[:space:]]+-[[:space:]]+(.*) ]]; then
-                local date_str=$(echo "$line" | sed -E 's/.*-[[:space:]]+(.*)/\1/')
-                local reformatted_date=$(echo "$date_str" | awk '{ print $2 " " $3 ", " $NF " " $4 " " $5 }')
-                last_summary_date=$(date -d "$reformatted_date" "+%Y-%m-%d %H:%M:%S" 2>/dev/null)
-                break
-            fi
-        done <<< "$reversed_content"
-        local processing_failed_section=0
-        while IFS= read -r line; do
-            if [[ "$line" =~ Overall[[:space:]]+Status:[[:space:]]+(SUCCESS|FAILED) ]]; then
-                overall_status=$(echo "$line" | sed -E 's/.*Status:[[:space:]]+(SUCCESS|FAILED)/\1/')
-                continue
-            fi
-            if [[ "$line" =~ Failed[[:space:]]+Backups: ]]; then
-                processing_failed_section=1
-                continue
-            fi
-            if [ $processing_failed_section -eq 1 ]; then
-                if [[ -z "$line" ]] || [[ "$line" =~ Summary[[:space:]]+-[[:space:]]+.* ]]; then
-                    processing_failed_section=0
-                    break
-                fi
-                if [[ "$line" =~ ^-[[:space:]]+([^[:space:]].*)$ ]] && ! [[ "$line" =~ ^-[[:space:]]+None$ ]]; then
-                    individual_failures_found=1
-                    failure_reason=$(echo "$line" | sed 's/^-[[:space:]]*//')
-                    break
-                fi
-            fi
-        done <<< "$log_content"
-    else
-        backup_status="${RED}⚠️  Backup log file not found: $backup_log${NC}"
+    
+    # Read backup.log content
+    local log_content=$(run_with_timeout 15 "cat '$backup_log' 2>/dev/null | tr -d '\0'")
+    local log_exit_code=$?
+    if [ $log_exit_code -ne 0 ]; then
+        backup_status="${RED}⚠️  Failed to read backup log ($log_exit_code)${NC}"
         ((high_issues++))
-        DETAILED_ISSUES_EMAIL+="<h3 style='color: #dc3545;'>💾 Backup System - Critical Issues</h3><ul style='margin: 10px 0; padding-left: 20px;'><li>Backup log file not found: $backup_log</li></ul>"
+        DETAILED_ISSUES_EMAIL+="<h3 style='color: #dc3545;'>💾 Backup System - Critical Issues</h3><ul style='margin: 10px 0; padding-left: 20px;'><li>Failed to read backup log (exit code: $log_exit_code)</li></ul>"
         return 1
     fi
-    if [ -z "$last_summary_date" ]; then
-        backup_status="${YELLOW}⚠️  Could not find last backup summary date in log${NC}"
-        ((has_issues++))
-    else
-        local summary_ts=$(date -d "$last_summary_date" +%s 2>/dev/null)
-        local current_ts=$(date +%s)
-        local days_since_summary=$(( (current_ts - summary_ts) / 86400 ))
-        if [ -z "$overall_status" ]; then
-            backup_status="${YELLOW}⚠️  Could not find overall backup status in log. Last summary date: $last_summary_date${NC}"
-            ((has_issues++))
-        elif [ "$overall_status" = "SUCCESS" ]; then
-            if [ $individual_failures_found -eq 1 ]; then
-                backup_status="${YELLOW}⚠️  Last backup summary: $last_summary_date (SUCCESS with failures: $failure_reason)${NC}"
-                ((medium_issues++))
-            else
-                backup_status="${GREEN}✓ Last backup summary: $last_summary_date (SUCCESS)${NC}"
+            
+    # Extract last backup date from log
+    local last_backup_date=""
+    local backup_start_line=$(echo "$log_content" | grep -n "Directory /backup cleaned before starting" | tail -1 | cut -d: -f1)
+    if [ -n "$backup_start_line" ]; then
+        local start_log_line=$(echo "$log_content" | sed -n "${backup_start_line}p")
+        if [[ "$start_log_line" =~ \[([^\]]+)\] ]]; then
+            last_backup_date="${BASH_REMATCH[1]}"
+        fi
+    fi
+            
+    # Analyze backup issues from log
+    local critical_errors=0
+    local medium_errors=0
+    local warnings=0
+    local failed_users=()
+    local corrupted_files=()
+    local upload_failures=()
+    local small_files=()
+    local disk_warnings=()
+            
+    # Critical errors detection
+        while IFS= read -r line; do
+        if [[ "$line" =~ "Error creating backup for user" ]]; then
+            local user=$(echo "$line" | sed -n 's/.*Error creating backup for user \([^ ]*\).*/\1/p')
+            failed_users+=("$user")
+            ((critical_errors++))
+        elif [[ "$line" =~ "only log files created, no valid backup archive" ]]; then
+            local user=$(echo "$line" | sed -n 's/.*Backup failed for user \([^ ]*\) -.*/\1/p')
+            failed_users+=("$user")
+            ((critical_errors++))
+        elif [[ "$line" =~ "is empty \(0 bytes\)" ]]; then
+            local file=$(echo "$line" | sed -n 's/.*Backup file \([^ ]*\) .*/\1/p')
+            corrupted_files+=("$file (empty)")
+            ((critical_errors++))
+        elif [[ "$line" =~ "is corrupted or not a valid tar archive" ]]; then
+            local file=$(echo "$line" | sed -n 's/.*Backup file \([^ ]*\) .*/\1/p')
+            corrupted_files+=("$file (corrupted)")
+            ((critical_errors++))
+        elif [[ "$line" =~ "Error uploading.*to Backblaze" ]]; then
+            local file=$(echo "$line" | sed -n 's/.*Error uploading \([^ ]*\) .*/\1/p')
+            upload_failures+=("$file")
+            ((critical_errors++))
+        elif [[ "$line" =~ "Upload verification failed" ]]; then
+            local file=$(echo "$line" | sed -n 's/.*Upload verification failed for \([^ ]*\) .*/\1/p')
+            upload_failures+=("$file (verification failed)")
+            ((critical_errors++))
+        elif [[ "$line" =~ "No backup files found for user" ]]; then
+            local user=$(echo "$line" | sed -n 's/.*No backup files found for user \([^ ]*\).*/\1/p')
+            failed_users+=("$user")
+            ((critical_errors++))
+        elif [[ "$line" =~ "Warning.*is very small" ]]; then
+            local file=$(echo "$line" | sed -n 's/.*file \([^ ]*\) .*/\1/p')
+            small_files+=("$file")
+            ((warnings++))
+        elif [[ "$line" =~ "Warning.*Low disk space detected" ]]; then
+            local space=$(echo "$line" | sed -n 's/.*(\([^)]*\) free).*/\1/p')
+            disk_warnings+=("$space")
+            ((warnings++))
+        fi
+    done <<< "$log_content"
+            
+    # Check backup summary if available
+    local overall_status=""
+    local summary_successful_users=()
+    local summary_failed_users=()
+            
+    if [ -f "$backup_summary" ]; then
+        local summary_content=$(run_with_timeout 10 "cat '$backup_summary' 2>/dev/null")
+        if [ $? -eq 0 ] && [ -n "$summary_content" ]; then
+            overall_status=$(echo "$summary_content" | grep "Overall Status:" | sed 's/.*Overall Status: //')
+                    
+            # Extract successful users
+            local in_success_section=0
+            local in_failed_section=0
+        while IFS= read -r line; do
+                if [[ "$line" =~ "Successful Backups:" ]]; then
+                    in_success_section=1
+                    in_failed_section=0
+                continue
+                elif [[ "$line" =~ "Failed Backups:" ]]; then
+                    in_success_section=0
+                    in_failed_section=1
+                    continue
+                elif [[ "$line" =~ ^[[:space:]]*$ ]] || [[ "$line" =~ ^= ]]; then
+                    in_success_section=0
+                    in_failed_section=0
+                continue
             fi
-            if [ $days_since_summary -gt 7 ]; then
-                backup_status="${YELLOW}⚠️  Warning: Last successful backup summary was $days_since_summary days ago${NC}"
+                        
+                if [ $in_success_section -eq 1 ] && [[ "$line" =~ ^[[:space:]]*-[[:space:]]+([^[:space:]]+) ]]; then
+                    local user=$(echo "$line" | sed 's/^[[:space:]]*-[[:space:]]*//')
+                    if [[ "$user" != "None" ]]; then
+                        summary_successful_users+=("$user")
+                    fi
+                elif [ $in_failed_section -eq 1 ] && [[ "$line" =~ ^[[:space:]]*-[[:space:]]+([^[:space:]]+) ]]; then
+                    local user=$(echo "$line" | sed 's/^[[:space:]]*-[[:space:]]*//')
+                    if [[ "$user" != "None" ]]; then
+                        summary_failed_users+=("$user")
+                    fi
+                fi
+            done <<< "$summary_content"
+        fi
+    fi
+            
+    # Determine backup status and severity
+    if [ -z "$last_backup_date" ]; then
+        backup_status="${YELLOW}⚠️  Could not determine last backup date from log${NC}"
+        ((medium_errors++))
+    else
+        local backup_ts=$(date -d "$last_backup_date" +%s 2>/dev/null)
+        local current_ts=$(date +%s)
+        local hours_since_backup=$(( (current_ts - backup_ts) / 3600 ))
+        local days_since_backup=$(( hours_since_backup / 24 ))
+                
+        if [ -z "$overall_status" ]; then
+            if [ $critical_errors -gt 0 ]; then
+                backup_status="${RED}⚠️  Last backup: $last_backup_date - CRITICAL ERRORS DETECTED${NC}"
+                ((high_issues++))
+                critical_modules_found+=("Backup")
+            elif [ $warnings -gt 0 ]; then
+                backup_status="${YELLOW}⚠️  Last backup: $last_backup_date - WARNINGS DETECTED${NC}"
+                ((medium_issues++))
+                medium_modules_found+=("Backup")
+            else
+                backup_status="${GREEN}✓ Last backup: $last_backup_date - No issues detected in log${NC}"
+            fi
+        elif [[ "$overall_status" =~ "CONTAINS ERRORS" ]]; then
+            backup_status="${RED}⚠️  Last backup: $last_backup_date - FAILED (${#summary_failed_users[@]} users failed)${NC}"
+            ((high_issues++))
+            critical_modules_found+=("Backup")
+        elif [[ "$overall_status" =~ "SUCCESS" ]]; then
+            if [ ${#summary_failed_users[@]} -gt 0 ] || [ $critical_errors -gt 0 ]; then
+                backup_status="${YELLOW}⚠️  Last backup: $last_backup_date - SUCCESS but with issues (${#summary_failed_users[@]} users failed)${NC}"
+                ((medium_issues++))
+                medium_modules_found+=("Backup")
+            else
+                backup_status="${GREEN}✓ Last backup: $last_backup_date - SUCCESS (${#summary_successful_users[@]} users)${NC}"
+            fi
+        fi
+                
+        # Check if backup is too old
+        if [ $days_since_backup -gt 7 ]; then
+            backup_status="${YELLOW}⚠️  Warning: Last backup was $days_since_backup days ago${NC}"
                 ((low_issues++))
                 low_modules_found+=("Backup")
             fi
-        else
-            backup_status="${RED}⚠️  Last backup summary: $last_summary_date (FAILED: $failure_reason)${NC}"
-            ((high_issues++))
-            DETAILED_ISSUES_EMAIL+="<h3 style='color: #dc3545;'>💾 Backup System - Critical Issues</h3><ul style='margin: 10px 0; padding-left: 20px;'><li>Last backup failed: $failure_reason</li></ul>"
+    fi
+            
+    # Build detailed issues report
+    if [ $critical_errors -gt 0 ] || [ ${#summary_failed_users[@]} -gt 0 ]; then
+        detailed_issues="<h3 style='color: #dc3545;'>💾 Backup System - Critical Issues</h3><ul style='margin: 10px 0; padding-left: 20px;'>"
+                
+        if [ ${#failed_users[@]} -gt 0 ]; then
+            detailed_issues+="<li><strong>Failed user backups:</strong> $(IFS=', '; echo "${failed_users[*]}")</li>"
+        fi
+                
+        if [ ${#summary_failed_users[@]} -gt 0 ]; then
+            detailed_issues+="<li><strong>Users with backup failures:</strong> $(IFS=', '; echo "${summary_failed_users[*]}")</li>"
+        fi
+                
+        if [ ${#corrupted_files[@]} -gt 0 ]; then
+            detailed_issues+="<li><strong>Corrupted/Empty backup files:</strong> $(IFS=', '; echo "${corrupted_files[*]}")</li>"
+        fi
+                
+        if [ ${#upload_failures[@]} -gt 0 ]; then
+            detailed_issues+="<li><strong>Upload failures:</strong> $(IFS=', '; echo "${upload_failures[*]}")</li>"
+        fi
+                
+        detailed_issues+="</ul>"
+        DETAILED_ISSUES_EMAIL+="$detailed_issues"
+                
+        if [ ${#small_files[@]} -gt 0 ] || [ ${#disk_warnings[@]} -gt 0 ]; then
+            detailed_issues+="<h3 style='color: #f39c12;'>💾 Backup System - Warnings</h3><ul style='margin: 10px 0; padding-left: 20px;'>"
+                    
+            if [ ${#small_files[@]} -gt 0 ]; then
+                detailed_issues+="<li><strong>Small backup files (possible incomplete):</strong> $(IFS=', '; echo "${small_files[*]}")</li>"
+            fi
+                    
+            if [ ${#disk_warnings[@]} -gt 0 ]; then
+                detailed_issues+="<li><strong>Low disk space warnings:</strong> $(IFS=', '; echo "${disk_warnings[*]}")</li>"
+            fi
+                    
+            detailed_issues+="</ul>"
         fi
     fi
-    echo "$backup_status"
-    return $has_issues
+            
+    # Build backup details for detailed_report
+    local backup_details="Last backup: ${last_backup_date:-'Unknown'}"
+    local health_level="EXCELLENT"
+    local health_score=95
+    
+    if [ -n "$overall_status" ]; then
+        backup_details+=", Status: $overall_status"
+    fi
+    
+    if [[ "$overall_status" =~ "CONTAINS ERRORS" ]] || [ $critical_errors -gt 0 ]; then
+        health_level="CRITICAL"
+        health_score=30
+    elif [ ${#summary_failed_users[@]} -gt 0 ] || [ $warnings -gt 0 ]; then
+        health_level="POOR"
+        health_score=50
+    elif [ $days_since_backup -gt 7 ]; then
+        health_level="FAIR"
+        health_score=70
+    fi
+    
+    detailed_report["backup"]="Health Level: $health_level Score: $health_score | $backup_details"
+    return 0
 }
 declare -g myvesta_attempts=0
 declare -g myvesta_failed=0
@@ -2652,6 +2801,7 @@ check_fail2ban_status() {
         local total_bans_today=0
         local total_unbans_today=0
         local total_currently_banned=0
+        local total_all_attempts=0  # Track total attempts including from banned IPs
         local today_log_content=$(grep "^$today" "$fail2ban_log" 2>/dev/null)
         echo -e "\n${YELLOW}Activity by Service (Today Only):${NC}"
         local ssh_attempts_counted=false
@@ -2670,24 +2820,19 @@ check_fail2ban_status() {
                     continue
                 fi
                 local today_failed=0
+                local today_new_threats=0  # Count based on new bans (most accurate for real threats)
                 declare -A banned_ips_jail
                 local jail_log_lines=$(echo "$today_log_content" | grep "\[$jail_name\]")
+                
+                # Simple and direct: just count the actual log entries
                 while IFS= read -r log_line; do
-                    local ip=""
                     if [[ "$log_line" =~ Found[[:space:]]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
-                        ip="${BASH_REMATCH[1]}"
-                        if [ -z "${banned_ips_jail[$ip]+x}" ]; then
                             today_failed=$((today_failed + 1))
-                        fi
-                    elif [[ "$log_line" =~ Ban[[:space:]]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
-                        ip="${BASH_REMATCH[1]}"
-                        banned_ips_jail[$ip]=1
-                    elif [[ "$log_line" =~ Unban[[:space:]]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
-                        ip="${BASH_REMATCH[1]}"
-                        unset banned_ips_jail[$ip]
                     fi
                 done <<< "$jail_log_lines"
+                
                 [ -z "$today_failed" ] && today_failed="0"
+                [ -z "$today_new_threats" ] && today_new_threats="0"
                 if [[ "$jail_name" == *"ssh"* ]]; then
                     ssh_total_attempts=$today_failed
                 fi
@@ -2703,14 +2848,16 @@ check_fail2ban_status() {
                     currently_banned=${currently_banned:-0}
                 fi
                 echo -e "  - $jail_name: ($jail_entries log entries today)"
-                echo -e "    * Failed attempts today: $today_failed"
+                echo -e "    * Total attempts today: $today_failed (all Found entries)"
+                echo -e "    * Real threats neutralized: $today_banned (actual bans)"
                 echo -e "    * Bans today: $today_banned"
                 echo -e "    * Unbans today: $today_unbanned"
                 echo -e "    * Currently banned: $currently_banned"
-                total_attempts_today=$((total_attempts_today + today_failed))
+                total_attempts_today=$((total_attempts_today + today_new_threats))  # Use new threats only
                 total_bans_today=$((total_bans_today + today_banned))
                 total_unbans_today=$((total_unbans_today + today_unbanned))
                 total_currently_banned=$((total_currently_banned + currently_banned))
+                total_all_attempts=$((total_all_attempts + today_failed))
             fi
         done
         if [ ${myvesta_attempts:-0} -gt 0 ]; then
@@ -2719,153 +2866,62 @@ check_fail2ban_status() {
             echo -e "    * Bans today: $myvesta_bans"
             total_attempts_today=$((total_attempts_today + myvesta_failed))
             total_bans_today=$((total_bans_today + myvesta_bans))
+            total_all_attempts=$((total_all_attempts + myvesta_failed))
         fi
         echo -e "${GREEN}✓ Today's data collected successfully.${NC}"
-        echo -e "\n${YELLOW}Today's Summary ($today):${NC}"
-        echo -e "  * Failed attempts today: $total_attempts_today"
-        echo -e "  * Bans today: $total_bans_today"
-        echo -e "  * Unbans today: $total_unbans_today"
-        echo -e "  * Currently banned IPs: $total_currently_banned"
-        echo -e "\n${YELLOW}Security Analysis:${NC}"
+        
+        # Calculate stats for summary
         local unique_attacking_ips=$(echo "$today_log_content" | grep "Found " | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | sort -u | wc -l)
         local unique_banned_ips=$(echo "$today_log_content" | grep "Ban " | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | sort -u | wc -l)
-        local attempts_per_ip=0
-        if [ $unique_attacking_ips -gt 0 ]; then
-            attempts_per_ip=$(echo "scale=1; $total_attempts_today / $unique_attacking_ips" | bc 2>/dev/null || echo "$((total_attempts_today / unique_attacking_ips))")
+        
+        # Simple threat scoring based on actual activity volume
+        local threat_score=100  # Start with perfect score
+        
+        # Subtract points based on attack volume (realistic thresholds)
+        if [ $total_all_attempts -gt 100000 ]; then
+            threat_score=$((threat_score - 30))
+        elif [ $total_all_attempts -gt 50000 ]; then
+            threat_score=$((threat_score - 20))
+        elif [ $total_all_attempts -gt 25000 ]; then
+            threat_score=$((threat_score - 15))
+        elif [ $total_all_attempts -gt 10000 ]; then
+            threat_score=$((threat_score - 10))
+        elif [ $total_all_attempts -gt 5000 ]; then
+            threat_score=$((threat_score - 5))
         fi
-        local bans_per_ip=0
-        if [ $unique_banned_ips -gt 0 ]; then
-            bans_per_ip=$(echo "scale=1; $total_bans_today / $unique_banned_ips" | bc 2>/dev/null || echo "$((total_bans_today / unique_banned_ips))")
-        fi
-        local maxretry_ssh=$(fail2ban-client get ssh-iptables maxretry 2>/dev/null || echo "5")
-        local maxretry_exim=$(fail2ban-client get exim-iptables maxretry 2>/dev/null || echo "5") 
-        local maxretry_dovecot=$(fail2ban-client get dovecot-iptables maxretry 2>/dev/null || echo "5")
-        local avg_maxretry=$((($maxretry_ssh + $maxretry_exim + $maxretry_dovecot) / 3))
-        local efficiency_ratio=1
-        if [ $total_bans_today -gt 0 ] && command -v bc &> /dev/null; then
-            efficiency_ratio=$(echo "scale=2; $total_attempts_today / $total_bans_today" | bc 2>/dev/null || echo "1")
-        elif [ $total_bans_today -gt 0 ]; then
-            efficiency_ratio=$((total_attempts_today / total_bans_today + 1))
-        fi
-        local system_type="standard"
-        if [ $avg_maxretry -le 1 ]; then
-            system_type="proactive"
-        elif [ $avg_maxretry -le 3 ]; then
-            system_type="aggressive" 
-        else
-            system_type="standard"
-        fi
-        local threat_score=0
-        local threat_level=""
-        local threat_color=""
-        if [ $total_bans_today -gt 1000 ]; then
-            threat_score=$((threat_score + 30))
-        elif [ $total_bans_today -gt 500 ]; then
-            threat_score=$((threat_score + 25))
-        elif [ $total_bans_today -gt 200 ]; then
-            threat_score=$((threat_score + 20))
-        elif [ $total_bans_today -gt 100 ]; then
-            threat_score=$((threat_score + 15))
-        elif [ $total_bans_today -gt 50 ]; then
-            threat_score=$((threat_score + 10))
-        elif [ $total_bans_today -gt 10 ]; then
-            threat_score=$((threat_score + 5))
-        fi
-        if [ $unique_banned_ips -gt 100 ]; then
-            threat_score=$((threat_score + 25))
-        elif [ $unique_banned_ips -gt 50 ]; then
-            threat_score=$((threat_score + 20))
-        elif [ $unique_banned_ips -gt 30 ]; then
-            threat_score=$((threat_score + 15))
-        elif [ $unique_banned_ips -gt 20 ]; then
-            threat_score=$((threat_score + 10))
-        elif [ $unique_banned_ips -gt 10 ]; then
-            threat_score=$((threat_score + 5))
-        fi
-        if command -v bc &> /dev/null; then
-            if (( $(echo "$attempts_per_ip > 2000" | bc -l) )); then
-            threat_score=$((threat_score + 20))
-            elif (( $(echo "$attempts_per_ip > 1000" | bc -l) )); then
-            threat_score=$((threat_score + 15))
-            elif (( $(echo "$attempts_per_ip > 500" | bc -l) )); then
-            threat_score=$((threat_score + 10))
-            elif (( $(echo "$attempts_per_ip > 200" | bc -l) )); then
-            threat_score=$((threat_score + 5))
-            fi
-        else
-            local attempts_per_ip_int=$(echo "$attempts_per_ip" | cut -d. -f1)
-            if [ ${attempts_per_ip_int:-0} -gt 2000 ]; then
-                threat_score=$((threat_score + 20))
-            elif [ ${attempts_per_ip_int:-0} -gt 1000 ]; then
-                threat_score=$((threat_score + 15))
-            elif [ ${attempts_per_ip_int:-0} -gt 500 ]; then
-                threat_score=$((threat_score + 10))
-            elif [ ${attempts_per_ip_int:-0} -gt 200 ]; then
-                threat_score=$((threat_score + 5))
-            fi
-        fi
-        if [ $total_currently_banned -gt 200 ]; then
-            threat_score=$((threat_score + 15))
-        elif [ $total_currently_banned -gt 100 ]; then
-            threat_score=$((threat_score + 12))
-        elif [ $total_currently_banned -gt 50 ]; then
-            threat_score=$((threat_score + 8))
-        elif [ $total_currently_banned -gt 25 ]; then
-            threat_score=$((threat_score + 4))
-        fi
-        if [ $total_attempts_today -gt 50000 ]; then
-            threat_score=$((threat_score + 10))
-        elif [ $total_attempts_today -gt 20000 ]; then
-            threat_score=$((threat_score + 8))
-        elif [ $total_attempts_today -gt 10000 ]; then
-            threat_score=$((threat_score + 6))
-        elif [ $total_attempts_today -gt 5000 ]; then
-            threat_score=$((threat_score + 4))
-        elif [ $total_attempts_today -gt 1000 ]; then
-            threat_score=$((threat_score + 2))
-        fi
-        if [ $threat_score -ge 75 ]; then
-            threat_level="CRITICAL"
-            threat_color="${RED}"
-        elif [ $threat_score -ge 50 ]; then
-            threat_level="POOR"
-            threat_color="${RED}"
-        elif [ $threat_score -ge 25 ]; then
-            threat_level="FAIR"
-            threat_color="${YELLOW}"
-        elif [ $threat_score -ge 10 ]; then
-            threat_level="GOOD"
-            threat_color="${GREEN}"
-        else
+        
+        # Ensure score doesn't go below 0
+        [ $threat_score -lt 0 ] && threat_score=0
+        
+        # Determine threat level based on final score
+        if [ $threat_score -ge 90 ]; then
             threat_level="EXCELLENT"
             threat_color="${GREEN}"
+        elif [ $threat_score -ge 75 ]; then
+            threat_level="GOOD"
+            threat_color="${GREEN}"
+        elif [ $threat_score -ge 60 ]; then
+            threat_level="FAIR"
+            threat_color="${YELLOW}"
+        elif [ $threat_score -ge 40 ]; then
+            threat_level="POOR"
+            threat_color="${RED}"
+        else
+            threat_level="CRITICAL"
+            threat_color="${RED}"
         fi
-        if [ "$system_type" = "proactive" ] && [ $total_bans_today -gt 200 ]; then
-            if command -v bc &> /dev/null && (( $(echo "$efficiency_ratio <= 1.5" | bc -l) )); then
-                threat_level="EXCELLENT"
-                threat_color="${GREEN}"
-                echo -e "  ${GREEN}• Intelligent Override: Proactive system working excellently${NC}"
-                echo -e "  ${GREEN}• System blocked $total_bans_today threats with $efficiency_ratio attempts per ban${NC}"
-            elif [ $efficiency_ratio -le 2 ]; then
-                threat_level="GOOD"
-                threat_color="${GREEN}" 
-                echo -e "  ${GREEN}• Intelligent Override: Proactive system working well${NC}"
-            fi
-        fi
+        
+        local health_score=$threat_score
+        
+        echo -e "\n${YELLOW}Today's Summary ($today):${NC}"
+        echo -e "  * Total attempts today: $total_all_attempts"
+        echo -e "  * Threats neutralized today: $total_bans_today"
+        echo -e "  * Unbans today: $total_unbans_today"
         echo -e "  * Unique attacking IPs: $unique_attacking_ips"
-        echo -e "  * Unique banned IPs: $unique_banned_ips"
-        echo -e "  * Average attempts per IP: $attempts_per_ip"
-        echo -e "  * Average bans per IP: $bans_per_ip"
-        local health_score
-        case "$threat_level" in
-            "EXCELLENT") health_score=100 ;;
-            "GOOD") health_score=90 ;;
-            "FAIR") health_score=75 ;;
-            "POOR") health_score=50 ;;
-            "CRITICAL") health_score=15 ;;
-            *) health_score=$((100 - threat_score)) ;;
-        esac
+        echo -e "  * Unique IPs banned: $unique_banned_ips"
+        echo -e "  * Currently banned IPs: $total_currently_banned"
         echo -e "  * ${threat_color}Health Level: $threat_level${NC} (Score: ${health_score}/100)"
+        
         echo -e "\n${YELLOW}Top 10 IPs Banned Today:${NC}"
         local bantime=$(fail2ban-client get ssh-iptables bantime 2>/dev/null || echo "600")
         local today_banned_ips=$(echo "$today_log_content" | grep "Ban " | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | sort | uniq -c | sort -nr | head -10)
@@ -2904,9 +2960,10 @@ check_fail2ban_status() {
                                     "dovecot") jail="dovecot" ;;
                                     "vesta") jail="vesta" ;;
                                 esac
+                                # Check if service is already in the services string to avoid duplicates
                                 if [ -z "$services" ]; then
                                     services="$jail"
-                                else
+                                elif ! echo "$services" | grep -q "\b$jail\b"; then
                                     services="$services,$jail"
                                 fi
                             fi
@@ -3724,7 +3781,9 @@ if [ "$CHECK_SSL" = true ]; then
     fi
 fi
 if [ "$CHECK_BACKUP" = true ]; then
-    backup_status=$(check_backup_status)
+    if ! run_check "Backup Status" check_backup_status; then
+         : # Issue already counted within the function
+    fi
 else
     backup_status="${YELLOW}⚠️  Backup check disabled${NC}"
 fi
