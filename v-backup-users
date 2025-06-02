@@ -61,27 +61,130 @@ for user in $(grep '@' /etc/passwd | cut -f1 -d:); do
         echo "[$(date)] : Starting backup for user $user." | tee -a $log
         nice -n 19 ionice -c 3 $BIN/v-backup-user $user | tee -a $log 2>&1
         STATUS=$?
+        
+        # Check if backup command failed
         if [ $STATUS -ne 0 ]; then
-            echo "[$(date)] : Error creating backup for user $user." | tee -a $log
+            echo "[$(date)] : Error creating backup for user $user (exit code: $STATUS)." | tee -a $log
             FINAL_STATUS='CONTAINS ERRORS !!!'
             FAILED_USERS+=("$user")
             continue
         fi
-        user_backup_files=$(ls /backup | grep "^$user\..*")
-        user_remote_path="$remote_base_path/$user"
-        for backup_file in $user_backup_files; do
-            echo "[$(date)] : Uploading $backup_file to $user_remote_path on Backblaze." | tee -a $log
-            rclone copy "/backup/$backup_file" "$user_remote_path/" | tee -a $log 2>&1
-            if [ $? -ne 0 ]; then
-                echo "[$(date)] : Error uploading $backup_file to Backblaze." | tee -a $log
+        
+        # Get all files created for this user (including .tar and .log files)
+        user_backup_files=$(ls /backup 2>/dev/null | grep "^$user\.")
+        
+        if [ -z "$user_backup_files" ]; then
+            echo "[$(date)] : No backup files found for user $user." | tee -a $log
+            FINAL_STATUS='CONTAINS ERRORS !!!'
+            FAILED_USERS+=("$user")
+            continue
+        fi
+        
+        # Check if we have valid .tar backup files
+        user_tar_files=$(echo "$user_backup_files" | grep "\.tar$")
+        user_log_files=$(echo "$user_backup_files" | grep "\.log$")
+        
+        if [ -z "$user_tar_files" ] && [ ! -z "$user_log_files" ]; then
+            echo "[$(date)] : Backup failed for user $user - only log files created, no valid backup archive." | tee -a $log
+            FINAL_STATUS='CONTAINS ERRORS !!!'
+            FAILED_USERS+=("$user")
+            # Clean up log files that shouldn't be uploaded as backups
+            for log_file in $user_log_files; do
+                rm -f "/backup/$log_file"
+                echo "[$(date)] : Removed error log file $log_file for user $user." | tee -a $log
+            done
+            continue
+        fi
+        
+        # Validate .tar files for integrity and minimum size
+        valid_tar_files=""
+        for tar_file in $user_tar_files; do
+            if [ ! -f "/backup/$tar_file" ]; then
+                echo "[$(date)] : Backup file /backup/$tar_file not found for user $user." | tee -a $log
                 FINAL_STATUS='CONTAINS ERRORS !!!'
                 FAILED_USERS+=("$user")
+                continue 2
+            fi
+            
+            # Check if file size is 0 or very small (less than 1MB might indicate issues)
+            file_size=$(stat -c%s "/backup/$tar_file" 2>/dev/null || echo "0")
+            if [ "$file_size" -eq 0 ]; then
+                echo "[$(date)] : Backup file $tar_file for user $user is empty (0 bytes)." | tee -a $log
+                FINAL_STATUS='CONTAINS ERRORS !!!'
+                FAILED_USERS+=("$user")
+                rm -f "/backup/$tar_file"
+                continue 2
+            elif [ "$file_size" -lt 1048576 ]; then  # Less than 1MB
+                echo "[$(date)] : Warning: Backup file $tar_file for user $user is very small ($file_size bytes). This might indicate an incomplete backup." | tee -a $log
+                # Continue but log the warning - small backups might be legitimate for minimal users
+            fi
+            
+            # Test tar file integrity
+            if ! tar -tf "/backup/$tar_file" >/dev/null 2>&1; then
+                echo "[$(date)] : Backup file $tar_file for user $user is corrupted or not a valid tar archive." | tee -a $log
+                FINAL_STATUS='CONTAINS ERRORS !!!'
+                FAILED_USERS+=("$user")
+                rm -f "/backup/$tar_file"
+                continue 2
+            fi
+            
+            valid_tar_files="$valid_tar_files $tar_file"
+        done
+        
+        # If no valid tar files remain after validation
+        if [ -z "$valid_tar_files" ]; then
+            echo "[$(date)] : No valid backup files remain for user $user after integrity checks." | tee -a $log
+            FINAL_STATUS='CONTAINS ERRORS !!!'
+            FAILED_USERS+=("$user")
+            continue
+        fi
+        
+        # Upload valid backup files only
+        user_remote_path="$remote_base_path/$user"
+        backup_success=true
+        
+        for backup_file in $valid_tar_files; do
+            echo "[$(date)] : Uploading $backup_file to $user_remote_path on Backblaze." | tee -a $log
+            
+            # Check available disk space before upload (basic check)
+            available_space=$(df /backup | awk 'NR==2 {print $4}')
+            if [ "$available_space" -lt 1048576 ]; then  # Less than 1GB free
+                echo "[$(date)] : Warning: Low disk space detected ($available_space KB free) during backup of $user." | tee -a $log
+            fi
+            
+            rclone copy "/backup/$backup_file" "$user_remote_path/" | tee -a $log 2>&1
+            upload_status=$?
+            
+            if [ $upload_status -ne 0 ]; then
+                echo "[$(date)] : Error uploading $backup_file to Backblaze (exit code: $upload_status)." | tee -a $log
+                FINAL_STATUS='CONTAINS ERRORS !!!'
+                backup_success=false
             else
-                rm -f "/backup/$backup_file"
-                echo "[$(date)] : $backup_file uploaded and removed locally." | tee -a $log
-                SUCCESS_USERS+=("$user")
+                # Verify file was actually uploaded by checking if rclone can see it
+                echo "[$(date)] : Verifying upload of $backup_file..." | tee -a $log
+                if rclone lsf "$user_remote_path/$backup_file" >/dev/null 2>&1; then
+                    rm -f "/backup/$backup_file"
+                    echo "[$(date)] : $backup_file uploaded successfully and removed locally." | tee -a $log
+                else
+                    echo "[$(date)] : Upload verification failed for $backup_file - file not found on remote." | tee -a $log
+                    FINAL_STATUS='CONTAINS ERRORS !!!'
+                    backup_success=false
+                fi
             fi
         done
+        
+        # Clean up any remaining log files after successful backup upload
+        for log_file in $user_log_files; do
+            rm -f "/backup/$log_file"
+            echo "[$(date)] : Cleaned up log file $log_file for user $user." | tee -a $log
+        done
+        
+        # Determine final status for this user
+        if [ "$backup_success" = true ]; then
+            SUCCESS_USERS+=("$user")
+        else
+            FAILED_USERS+=("$user")
+        fi
     fi
 done
 
@@ -115,6 +218,11 @@ else
 fi
 
 email_subject="Backup Summary Report for $HOSTNAME"
+if [ "$FINAL_STATUS" != "SUCCESS" ]; then
+    email_subject="[ERROR] Backup Summary Report for $HOSTNAME - CONTAINS ERRORS"
+else
+    email_subject="[SUCCESS] Backup Summary Report for $HOSTNAME"
+fi
 log_attachment="/tmp/backup_log_$(date +"%Y-%m-%d_%H-%M-%S").log"
 cp $log $log_attachment
 
