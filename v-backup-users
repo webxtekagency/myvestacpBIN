@@ -45,7 +45,7 @@ fi
 
 if [ $ALLOW_MYSQL_REPAIR -eq 1 ]; then
     echo "[$(date)] : Database repair started." | tee -a $log
-    nice -n 19 ionice -c 3 mysqlrepair --all-databases --check --auto-repair | tee -a $log 2>&1
+    nice -n 19 ionice -c 3 mariadb-check --all-databases --check --auto-repair | tee -a $log 2>&1
 fi
 
 FINAL_STATUS='SUCCESS'
