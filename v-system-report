@@ -10,6 +10,7 @@ CHECK_SYSTEM_RESOURCES=true
 CHECK_MYVESTACP_SERVICES=true
 CHECK_PHP=true
 CHECK_MYSQL=true
+CHECK_MYSQL_COMMANDS=false
 CHECK_CLAMAV=true
 CHECK_FAIL2BAN=true
 CHECK_FAIL2BAN_CONFIG=false
@@ -28,11 +29,10 @@ AI_API_KEY="" #Add your HuggingFace API key
 AI_MODEL="mistralai/Mixtral-8x7B-Instruct-v0.1"
 AI_MAX_LENGTH=1000
 
-# Log Configuration
+
 LOG_DIR="/var/log/v-system-report"
 LOG_FILE=""
 
-# Internal variables (do not modify)
 ai_analysis=""
 DETAILED_ISSUES_HTML=""
 AI_LAST_ERROR=""
@@ -197,12 +197,12 @@ should_run_ai_analysis() {
     fi
     case "$AI_MODE" in
         "always")
-            return 0  # Always run AI
+            return 0
             ;;
         "never")
-            return 1  # Never run AI
+            return 1
             ;;
-        "auto"|*)  # Default to auto mode
+        "auto"|*)
             if [ $high_issues -gt 0 ] || [ $medium_issues -gt 0 ]; then
                 return 0
             else
@@ -294,6 +294,7 @@ Important guidelines:
     [ "$CHECK_MYVESTACP_SERVICES" = true ] && prompt+="MyVestaCP Services: ENABLED\n" || prompt+="MyVestaCP Services: DISABLED\n"
     [ "$CHECK_PHP" = true ] && prompt+="PHP-FPM: ENABLED\n" || prompt+="PHP-FPM: DISABLED\n"
     [ "$CHECK_MYSQL" = true ] && prompt+="MySQL: ENABLED\n" || prompt+="MySQL: DISABLED\n"
+    [ "$CHECK_MYSQL_COMMANDS" = true ] && prompt+="MySQL Commands: ENABLED\n" || prompt+="MySQL Commands: DISABLED\n"
     [ "$CHECK_CLAMAV" = true ] && prompt+="ClamAV: ENABLED\n" || prompt+="ClamAV: DISABLED\n"
     [ "$CHECK_FAIL2BAN" = true ] && prompt+="Fail2Ban: ENABLED\n" || prompt+="Fail2Ban: DISABLED\n"
     [ "$CHECK_EXIM4" = true ] && prompt+="Email: ENABLED\n" || prompt+="Email: DISABLED\n"
@@ -555,16 +556,16 @@ is_recent_log() {
         log_ts=$(date -d "$(echo "$line" | awk '{print $1, $2}' 2>/dev/null)" +%s 2>/dev/null)
     fi
     if [ -n "$log_ts" ] && [ "$log_ts" -ge "$day_ago_ts" ]; then
-        return 0 # True, is recent
+        return 0
     else
-        return 1 # False, not recent or date extraction failed
+        return 1
     fi
 }
 get_recent_logs() {
     local log_file="$1"
     local pattern="$2"
     local count="${3:-0}"
-    local timeout="${4:-30}"  # Default timeout of 30 seconds
+    local timeout="${4:-30}"
     if [ ! -f "$log_file" ]; then
         echo -e "${RED}⚠️  Log file not found: $log_file${NC}"
         return 1
@@ -601,7 +602,7 @@ get_country() {
 check_resources() {
     local output=()
     output+=("${BLUE}=== System Resources ===${NC}")
-    local current_issues=0 # Local counter for this function
+    local current_issues=0
     output+=("${YELLOW}CPU:${NC}")
     local load_avg=$(run_with_timeout 5 "cat /proc/loadavg | awk '{print \$3}'")
     local cpu_usage=$(run_with_timeout 5 "top -bn1 | grep 'Cpu(s)' | awk '{print \$2 + \$4}'")
@@ -655,7 +656,7 @@ check_resources() {
         local disk_usage=$(run_with_timeout 5 "df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'")
         local cpu_cores=$(run_with_timeout 5 "nproc")
         detailed_report["system_resources"]="Load Average: $load_avg (CPU cores: $cpu_cores), CPU Usage: ${cpu_usage}%, Memory Usage: ${mem_usage}%, Disk Usage: ${disk_usage}%"
-        return 1 # Indicates problems were found
+        return 1
     else
         local load_avg=$(run_with_timeout 5 "cat /proc/loadavg | awk '{print \$3}'")
         local cpu_usage=$(run_with_timeout 5 "top -bn1 | grep 'Cpu(s)' | awk '{print \$2 + \$4}'")
@@ -663,15 +664,15 @@ check_resources() {
         local disk_usage=$(run_with_timeout 5 "df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'")
         local cpu_cores=$(run_with_timeout 5 "nproc")
         detailed_report["system_resources"]="Load Average: $load_avg (CPU cores: $cpu_cores), CPU Usage: ${cpu_usage}%, Memory Usage: ${mem_usage}%, Disk Usage: ${disk_usage}% - All within normal ranges"
-        return 0 # Indicates no problems were found
+        return 0
     fi
 }
 check_myvestacp_services() {
     printf "%b\n" "${BLUE}=== MyVestaCP Services Status ===${NC}"
-    printf "\n"  # Single space after title
-    sleep 0.5  # Small delay to create a loading effect
-    show_progress 1 1  # Shows a single progress bar
-    printf "\n"  # Line break after the bar
+    printf "\n"
+    sleep 0.5
+    show_progress 1 1
+    printf "\n"
     local current_high_issues=0
     local current_medium_issues=0
     local current_low_issues=0
@@ -702,10 +703,10 @@ check_myvestacp_services() {
                       "$service" == "clamav-daemon" || "$service" == "clamav-freshclam" || \
                       "$service" == "mariadb" || "$service" == "cron" || "$service" == "ssh" ]]; then
                     ((current_high_issues++))
-                    health_score=$((health_score - 10))  # Critical service down: -10 points
+                    health_score=$((health_score - 10))
                 else
                     ((current_medium_issues++))
-                    health_score=$((health_score - 5))   # Non-critical service down: -5 points
+                    health_score=$((health_score - 5))
                 fi
             fi
         done
@@ -860,10 +861,10 @@ check_email_status() {
         local exim_processes=$(run_with_timeout 5 "pgrep -c exim4 2>/dev/null || echo 0")
         if [ -n "$exim_processes" ] && [[ "$exim_processes" =~ ^[0-9]+$ ]] && [ "$exim_processes" -gt 10 ]; then
             output+=("${YELLOW}⚠️  High number of Exim processes: $exim_processes${NC}")
-            recent_failures=$((recent_failures + 5))  # Add to failure count as performance indicator
+            recent_failures=$((recent_failures + 5))
         elif [ "$exim_processes" -gt 0 ]; then
             output+=("${GREEN}✓ Exim processes: $exim_processes${NC}")
-            recent_deliveries=1  # Indicate system is active
+            recent_deliveries=1
         fi
     fi
     local spool_usage=""
@@ -961,7 +962,7 @@ check_email_status() {
         if [ "$spam_count" -gt 0 ]; then
             output+=("${GREEN}✓ Spam/blocked messages: $spam_count${NC}")
         fi
-        if [ "$smtp_connections" -gt 20 ]; then  # Only show if significant activity
+        if [ "$smtp_connections" -gt 20 ]; then
             output+=("${BLUE}ℹ️  SMTP connections: $smtp_connections${NC}")
         fi
         if [ "$total_attempts" -gt 0 ]; then
@@ -993,49 +994,49 @@ check_email_status() {
     local factor_explanations=()
     local service_factor=0
     if [ "$exim4_running" = false ]; then
-        service_factor=30  # Critical - main email service down
+        service_factor=30
         factor_explanations+=("Exim4 service down: +30 points (CRITICAL)")
     elif [ "$dovecot_running" = false ]; then
-        service_factor=20  # High - IMAP/POP3 service down
+        service_factor=20
         factor_explanations+=("Dovecot service down: +20 points")
     fi
     threat_score=$((threat_score + service_factor))
     local queue_factor=0
     if [ "$frozen_count" -gt 10 ]; then
-        queue_factor=25  # Critical - many frozen messages
+        queue_factor=25
         factor_explanations+=("High frozen messages: +25 points (${frozen_count} frozen)")
     elif [ "$frozen_count" -gt 0 ]; then
-        queue_factor=15  # Medium - some frozen messages
+        queue_factor=15
         factor_explanations+=("Frozen messages: +15 points (${frozen_count} frozen)")
     elif [ "$queue_count" -gt 1000 ]; then
-        queue_factor=20  # High - large queue backlog
+        queue_factor=20
         factor_explanations+=("Large queue backlog: +20 points (${queue_count} messages)")
     elif [ "$queue_count" -gt 100 ]; then
-        queue_factor=10  # Medium - moderate queue
+        queue_factor=10
         factor_explanations+=("Moderate queue: +10 points (${queue_count} messages)")
     fi
     threat_score=$((threat_score + queue_factor))
     local failure_factor=0
     if [ "$recent_failures" -gt 50 ]; then
-        failure_factor=20  # High - many recent failures (was 20)
+        failure_factor=20
         factor_explanations+=("High recent failures: +20 points (${recent_failures} failures)")
     elif [ "$recent_failures" -gt 30 ]; then
-        failure_factor=10  # Medium - some recent failures (was 10)
+        failure_factor=10
         factor_explanations+=("Recent failures: +10 points (${recent_failures} failures)")
     fi
     threat_score=$((threat_score + failure_factor))
     local config_factor=0
     if [ "$config_errors" -gt 0 ]; then
-        config_factor=15  # Configuration issues
+        config_factor=15
         factor_explanations+=("Configuration issues: +15 points")
     fi
     threat_score=$((threat_score + config_factor))
     local auth_factor=0
     if [ "$auth_failures" -gt 500 ]; then
-        auth_factor=10  # Very high auth failures (was 10)
+        auth_factor=10
         factor_explanations+=("Very high auth failures: +10 points (${auth_failures} failures)")
     elif [ "$auth_failures" -gt 200 ]; then
-        auth_factor=5  # High auth failures (was 5)
+        auth_factor=5
         factor_explanations+=("High auth failures: +5 points (${auth_failures} failures)")
     fi
     threat_score=$((threat_score + auth_factor))
@@ -1203,11 +1204,11 @@ check_ssl_status() {
                                             if [ "$days_left" -le 3 ]; then
                                                 echo -e "${RED}⚠️  $domain expires in $days_left days (renewal needed)${NC}"
                                                 ((needs_renewal++))
-                                                ((current_high_issues++))  # ≤3 days = CRITICAL issue
+                                                ((current_high_issues++))
                                             elif [ "$days_left" -le 7 ]; then
                                                 echo -e "${YELLOW}⚠️  $domain expires in $days_left days (monitor closely)${NC}"
                                                 ((needs_renewal++))
-                                                ((current_medium_issues++))  # 4-7 days = MEDIUM issue
+                                                ((current_medium_issues++))
                                             else
                                                 echo -e "${GREEN}✓ $domain valid for $days_left days${NC}"
                                             fi
@@ -1256,11 +1257,11 @@ check_ssl_status() {
                     if [ "$days_left" -le 3 ]; then
                         echo -e "${RED}⚠️  Vesta Control Panel ($vesta_domain) expires in $days_left days${NC}"
                         ((needs_renewal++))
-                        ((current_high_issues++))  # ≤3 days = CRITICAL
+                        ((current_high_issues++))
                     elif [ "$days_left" -le 7 ]; then
                         echo -e "${YELLOW}⚠️  Vesta Control Panel ($vesta_domain) expires in $days_left days${NC}"
                         ((needs_renewal++))
-                        ((current_medium_issues++))  # 4-7 days = MEDIUM
+                        ((current_medium_issues++))
                     else
                         echo -e "${GREEN}✓ Vesta Control Panel ($vesta_domain) valid for $days_left days${NC}"
                     fi
@@ -1290,12 +1291,12 @@ check_ssl_status() {
         ((current_medium_issues++))
     fi
     local health_score=100
-    health_score=$((health_score - (expired_certificates * 30)))        # -30 per expired cert
-    health_score=$((health_score - (verification_failures * 10)))      # -10 per verification failure
-    health_score=$((health_score - (connectivity_issues * 5)))          # -5 per DNS/connectivity issue
-    health_score=$((health_score - (renewal_errors * 15)))              # -15 per renewal error
+    health_score=$((health_score - (expired_certificates * 30)))
+    health_score=$((health_score - (verification_failures * 10)))
+    health_score=$((health_score - (connectivity_issues * 5)))
+    health_score=$((health_score - (renewal_errors * 15)))
     if [ "$current_high_issues" -gt 0 ]; then
-        health_score=$((health_score - (current_high_issues * 20)))     # -20 per cert expiring ≤3 days
+        health_score=$((health_score - (current_high_issues * 20)))
     fi
     if [ "$health_score" -lt 0 ]; then
         health_score=0
@@ -1420,17 +1421,17 @@ check_php_status() {
         detailed_report["php"]="No PHP versions detected on system"
         return 1
     fi
-    local service_health=0       # 40% - Service status
-    local config_health=0        # 25% - Configuration validity  
-    local performance_health=0   # 20% - Performance metrics
-    local log_health=0          # 15% - Critical errors only
+    local service_health=0
+    local config_health=0  
+    local performance_health=0
+    local log_health=0
     local total_services=0
     local running_services=0
     local config_valid=0
     local total_configs=0
     local performance_issues=0
     local critical_log_issues=0
-    local total_warning_count=0  # Global warning counter
+    local total_warning_count=0
     
     for version in "${php_versions[@]}"; do
         echo -e "${YELLOW}PHP $version:${NC}"
@@ -1480,12 +1481,42 @@ check_php_status() {
                 echo -e "  * ${config_test}"
                 ((current_medium_issues++))
             fi
-            local max_children=$(grep -r "pm\.max_children" "/etc/php/${version}/fpm/pool.d/" 2>/dev/null | head -1 | awk '{print $3}' | tr -d '\n' || echo "Unknown")
-            local process_manager=$(grep -r "^pm =" "/etc/php/${version}/fpm/pool.d/" 2>/dev/null | head -1 | awk '{print $3}' | tr -d '\n' || echo "Unknown")
-            if [ "$max_children" != "Unknown" ]; then
-                echo -e "  * Max children: $max_children"
-                echo -e "  * Process manager: $process_manager"
+            local max_children=$(grep -r "^pm\.max_children" "/etc/php/${version}/fpm/pool.d/" 2>/dev/null | head -1 | awk '{print $3}' | tr -d '\n' || echo "")
+            local process_manager=$(grep -r "^pm =" "/etc/php/${version}/fpm/pool.d/" 2>/dev/null | head -1 | awk '{print $3}' | tr -d '\n' || echo "unknown")
+            
+            local start_servers=$(grep -r "^pm\.start_servers" "/etc/php/${version}/fpm/pool.d/" 2>/dev/null | head -1 | awk '{print $3}' | tr -d '\n' || echo "")
+            local min_spare=$(grep -r "^pm\.min_spare_servers" "/etc/php/${version}/fpm/pool.d/" 2>/dev/null | head -1 | awk '{print $3}' | tr -d '\n' || echo "")
+            local max_spare=$(grep -r "^pm\.max_spare_servers" "/etc/php/${version}/fpm/pool.d/" 2>/dev/null | head -1 | awk '{print $3}' | tr -d '\n' || echo "")
+            
+            local max_children_display=""
+            if [ -n "$max_children" ] && [ "$max_children" != "" ]; then
+                max_children_display="$max_children"
+            else
+                case "$process_manager" in
+                    "dynamic")
+                        if [ -n "$start_servers" ]; then
+                            max_children_display="auto (start: $start_servers"
+                            [ -n "$min_spare" ] && max_children_display="$max_children_display, min: $min_spare"
+                            [ -n "$max_spare" ] && max_children_display="$max_children_display, max: $max_spare"
+                            max_children_display="$max_children_display)"
+                        else
+                            max_children_display="auto (dynamic)"
+                        fi
+                        ;;
+                    "ondemand")
+                        max_children_display="on-demand"
+                        ;;
+                    "static")
+                        max_children_display="static (config missing)"
+                        ;;
+                    *)
+                        max_children_display="auto"
+                        ;;
+                esac
             fi
+            
+            echo -e "  * Max children: $max_children_display"
+            echo -e "  * Process manager: $process_manager"
         else
             echo -e "${RED}⚠️  Configuration file not found${NC}"
             ((current_medium_issues++))
@@ -1504,9 +1535,8 @@ check_php_status() {
             stuck_processes=$(echo "$stuck_processes" | tr -d ' \n' | grep -o '^[0-9]*' || echo "0")
             if [ "$stuck_processes" -gt 0 ] 2>/dev/null; then
                 echo -e "${YELLOW}  * Potentially stuck processes: $stuck_processes${NC}"
-                # Only count stuck processes as half a performance issue since they're not critical
                 if [ "$stuck_processes" -gt 5 ]; then
-                    ((performance_issues++))  # Only count if more than 5 stuck processes
+                    ((performance_issues++))
                 fi
             fi
         fi
@@ -1544,14 +1574,14 @@ check_php_status() {
                 CRITICAL_ISSUES_EMAIL+=("</ul>")
             elif [ "$warning_issues" -gt 0 ] 2>/dev/null; then
                 echo -e "${YELLOW}⚠️  Performance warnings today: $warning_issues${NC}"
-                total_warning_count=$((total_warning_count + warning_issues))  # Add to global counter
+                total_warning_count=$((total_warning_count + warning_issues))
                 local all_warnings=$(grep "$today.*WARNING.*\(max_children\|server reached\|pool .* server reached\)" "$log_file" 2>/dev/null)
                 if [ -n "$all_warnings" ]; then
                     local warning_count=0
                     while IFS= read -r warning_line; do
                         if [ -n "$warning_line" ]; then
                             ((warning_count++))
-                            if [ "$warning_count" -le 3 ]; then  # Show up to 3 warnings to avoid spam
+                            if [ "$warning_count" -le 3 ]; then
                                 local warning_time=$(echo "$warning_line" | grep -o '\[[0-9][0-9]-[A-Za-z]*-[0-9]* [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\]')
                                 local pool_name=$(echo "$warning_line" | grep -o '\[pool [^]]*\]' | sed 's/\[pool \(.*\)\]/\1/')
                                 local warning_msg=$(echo "$warning_line" | sed 's/.*WARNING: //' | sed 's/\[pool [^]]*\] //')
@@ -1569,6 +1599,17 @@ check_php_status() {
                 fi
                 ((performance_issues++))
                 ((current_medium_issues++))
+                
+                echo -e "\n${CYAN}💡 Quick Fix Commands for max_children Issues:${NC}"
+                echo -e "${YELLOW}# To increase max_children for a specific PHP version (e.g., PHP $version):${NC}"
+                echo -e "  ${GREEN}find /etc/php/$version/fpm/pool.d/ -name \"*.conf\" -exec sed -i 's/^pm\\.max_children = .*/pm.max_children = 40/' {} \\;${NC}"
+                echo -e "  ${GREEN}systemctl reload php$version-fpm${NC}"
+                echo -e "\n${YELLOW}# To set max_children = 40 for ALL PHP versions:${NC}"
+                echo -e "  ${GREEN}for version in \$(ls /etc/php/ | grep -E '^[0-9]+\\.[0-9]+\$'); do find /etc/php/\$version/fpm/pool.d/ -name \"*.conf\" -exec sed -i 's/^pm\\.max_children = .*/pm.max_children = 40/' {} \\; && systemctl reload php\$version-fpm; done${NC}"
+                echo -e "\n${YELLOW}# To check current max_children values:${NC}"
+                echo -e "  ${GREEN}for version in \$(ls /etc/php/ | grep -E '^[0-9]+\\.[0-9]+\$'); do echo \"PHP \$version:\"; grep '^pm\\.max_children' /etc/php/\$version/fpm/pool.d/*.conf; done${NC}"
+                echo -e "\n${RED}⚠️  Remember to reload PHP-FPM after making changes!${NC}"
+                
                 MEDIUM_ISSUES_EMAIL+=("<h3 style='color: #fd7e14;'>🐘 PHP $version - Performance Warnings ($warning_issues)</h3>")
                 MEDIUM_ISSUES_EMAIL+=("<ul style='margin: 10px 0; padding-left: 20px;'>")
                 if [ -n "$all_warnings" ]; then
@@ -1596,7 +1637,7 @@ check_php_status() {
                 MEDIUM_ISSUES_EMAIL+=("</ul>")
             elif [ "$general_warnings" -gt 0 ] 2>/dev/null; then
                 echo -e "${YELLOW}⚠️  General warnings today: $general_warnings${NC}"
-                total_warning_count=$((total_warning_count + general_warnings))  # Add to global counter
+                total_warning_count=$((total_warning_count + general_warnings))
                 ((current_low_issues++))
                 LOW_ISSUES_EMAIL+=("<h3 style='color: #fd7e14;'>🐘 PHP $version - General Warnings ($general_warnings)</h3>")
                 LOW_ISSUES_EMAIL+=("<ul style='margin: 10px 0; padding-left: 20px;'>")
@@ -1633,7 +1674,6 @@ check_php_status() {
         performance_health=10
     fi
     
-    # Adjust performance health based on total warning count
     if [ "$total_warning_count" -gt 0 ]; then
         if [ "$total_warning_count" -le 5 ]; then
             performance_health=$((performance_health - 40))
@@ -1642,7 +1682,6 @@ check_php_status() {
         else
             performance_health=$((performance_health - 80))
         fi
-        # Ensure performance_health doesn't go below 0
         [ "$performance_health" -lt 0 ] && performance_health=0
     fi
     if [ "$critical_log_issues" -eq 0 ]; then
@@ -1656,7 +1695,6 @@ check_php_status() {
     fi
     local health_score=$(( (service_health * 40 + config_health * 25 + performance_health * 20 + log_health * 15) / 100 ))
     
-    # Apply additional penalty for warnings to ensure proper classification  
     if [ "$total_warning_count" -gt 0 ]; then
         health_score=$((health_score - 20))
         [ "$health_score" -lt 0 ] && health_score=0
@@ -1722,10 +1760,10 @@ check_mysql_status() {
     local current_high_issues=0
     local current_medium_issues=0
     local current_low_issues=0
-    local service_health=0       # 35% - Service status
-    local connection_health=0    # 30% - Connection capability
-    local performance_health=0   # 20% - Performance metrics
-    local config_health=0        # 15% - Configuration status
+    local service_health=0
+    local connection_health=0
+    local performance_health=0
+    local config_health=0
     local mysql_service=""
     local service_status=""
     local service_enabled=""
@@ -1852,7 +1890,7 @@ check_mysql_status() {
             config_health=80
         fi
         local config_warnings=$(mysql -e "SHOW WARNINGS;" 2>/dev/null | wc -l)
-        if [ "$config_warnings" -gt 1 ]; then  # More than header line
+        if [ "$config_warnings" -gt 1 ]; then
             echo -e "${YELLOW}  * Configuration warnings detected${NC}"
             ((current_low_issues++))
             config_health=70
@@ -1953,12 +1991,12 @@ ${YELLOW}Analyzing logs for additional context...${NC}"
     local health_score=$(( (service_health * 35 + connection_health * 30 + performance_health * 20 + config_health * 15) / 100 ))
     if [ "$critical_log_issues" -gt 0 ]; then
         if echo "$error_details" | grep -q "Table.*marked as crashed\|Table.*corrupted"; then
-            health_score=$(( health_score - 15 ))  # Fixed 15 point deduction regardless of count
+            health_score=$(( health_score - 15 ))
         else
-            health_score=$(( health_score - (critical_log_issues * 2) ))  # 2 points per error instead of 10
+            health_score=$(( health_score - (critical_log_issues * 2) ))
         fi
         if [ "$health_score" -lt 25 ]; then
-            health_score=25  # Never go below 25 if service is running well
+            health_score=25
         fi
     fi
     local mysql_health_level=""
@@ -1998,7 +2036,6 @@ ${YELLOW}Analyzing logs for additional context...${NC}"
         critical_modules_found+=("MySQL")
             mysql_details="Health Level: $mysql_health_level (Score: ${health_score}/100) - Critical MySQL issues: Service failures, connection problems, or major performance issues - Immediate action required: Check service status and error logs."
             
-            # Add MySQL details to email report
             CRITICAL_ISSUES_EMAIL+=("<h3 style='color: #dc3545;'>🗄️ MySQL Database - Critical Issues</h3>")
             CRITICAL_ISSUES_EMAIL+=("<ul style='margin: 10px 0; padding-left: 20px;'>")
             if [ "$total_crash_indicators" -gt 0 ]; then
@@ -2021,7 +2058,6 @@ ${YELLOW}Analyzing logs for additional context...${NC}"
             high_modules_found+=("MySQL")
             mysql_details="Health Level: $mysql_health_level (Score: ${health_score}/100) - MySQL issues requiring attention: Performance problems or connection issues - Action recommended: Review performance metrics and logs."
             
-            # Add MySQL details to email report for high issues
             HIGH_ISSUES_EMAIL+=("<h3 style='color: #fd7e14;'>🗄️ MySQL Database - Performance Issues</h3>")
             HIGH_ISSUES_EMAIL+=("<ul style='margin: 10px 0; padding-left: 20px;'>")
             if [ "$total_errors" -gt 0 ]; then
@@ -2041,6 +2077,42 @@ ${YELLOW}Analyzing logs for additional context...${NC}"
     else
         mysql_details="Health Level: $mysql_health_level (Score: ${health_score}/100) - MySQL functioning optimally: Service running without issues - No action needed."
     fi
+    
+    if [ "$CHECK_MYSQL_COMMANDS" = true ]; then
+        echo -e ""
+        echo -e "${BLUE}=== MariaDB/MySQL Maintenance Commands ===${NC}"
+        echo -e "${GREEN}ℹ️  Database Maintenance Reference Guide${NC}"
+        echo -e ""
+        echo -e "${YELLOW}# Basic Database Health Check:${NC}"
+        echo -e "  mariadb-check --all-databases --check --verbose"
+        echo -e ""
+        echo -e "${YELLOW}# Check and Auto-Repair All Databases:${NC}"
+        echo -e "  mariadb-check --all-databases --check --auto-repair --verbose"
+        echo -e ""
+        echo -e "${YELLOW}# Analyze Database Performance:${NC}"
+        echo -e "  mariadb-check --all-databases --analyze --verbose"
+        echo -e ""
+        echo -e "${YELLOW}# Optimize All Tables:${NC}"
+        echo -e "  mariadb-check --all-databases --optimize --verbose"
+        echo -e ""
+        echo -e "${YELLOW}# Complete Maintenance (check + repair + optimize):${NC}"
+        echo -e "  mariadb-check --all-databases --check --auto-repair --verbose"
+        echo -e "  mariadb-check --all-databases --optimize --verbose"
+        echo -e ""
+        echo -e "${YELLOW}# Repair Specific Table:${NC}"
+        echo -e "  mariadb -u root -e \"USE database_name; REPAIR TABLE table_name;\""
+        echo -e ""
+        echo -e "${YELLOW}# Check Specific Database:${NC}"
+        echo -e "  mariadb-check database_name --check --verbose"
+        echo -e ""
+        echo -e "${YELLOW}# Monitor with Log Output:${NC}"
+        echo -e "  mariadb-check --all-databases --check --auto-repair --verbose 2>&1 | tee /tmp/db_maintenance_\$(date +%Y%m%d_%H%M%S).log"
+        echo -e ""
+        echo -e "${GREEN}✓ Commands ready for database maintenance${NC}"
+        echo -e "${BLUE}Note: Run these commands as root or with appropriate MySQL/MariaDB privileges${NC}"
+        echo -e ""
+    fi
+    
     detailed_report["mysql"]="$mysql_details"
     if [ $((current_high_issues + current_medium_issues + current_low_issues)) -gt 0 ]; then
         return 1
@@ -2090,10 +2162,8 @@ check_clamav_status() {
         fi
     fi
     if $freshclam_running; then
-        # Try using sigtool to get database info (modern ClamAV)
         local daily_db_info=""
         if command -v sigtool >/dev/null 2>&1; then
-            # Try multiple database file locations
             local db_locations=(
                 "/var/lib/clamav/daily.cvd"
                 "/var/lib/clamav/daily.cld"
@@ -2128,7 +2198,6 @@ check_clamav_status() {
             done
         fi
         
-        # Fallback: try freshclam logs for update information
         if [ -z "$database_date" ] && [ -f "/var/log/clamav/freshclam.log" ]; then
             local last_update_line=$(run_with_timeout 5 "grep -E '(updated|downloaded).*database' /var/log/clamav/freshclam.log 2>/dev/null | tail -n 1")
             if [ -n "$last_update_line" ]; then
@@ -2150,7 +2219,6 @@ check_clamav_status() {
             fi
         fi
         
-        # Second fallback: try systemctl status for freshclam
         if [ -z "$database_date" ]; then
             local status_output=$(run_with_timeout 5 "systemctl status clamav-freshclam 2>/dev/null | grep 'database is up-to-date' | tail -n 1")
             if [ -n "$status_output" ]; then
@@ -2238,7 +2306,7 @@ check_clamav_status() {
             last_scan=$(echo "$last_scan_line" | grep -o '^[A-Za-z]\{3\} [A-Za-z]\{3\} [0-9]\{1,2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\} [0-9]\{4\}' 2>/dev/null)
             if [ -n "$last_scan" ]; then
                 output+=("${GREEN}✓ Last scan detected: $last_scan${NC}")
-                scans=1  # At least one scan detected
+                scans=1
             fi
         fi
     fi
@@ -2258,47 +2326,44 @@ check_clamav_status() {
     local factor_explanations=()
     local infection_factor=0
     if [ "$unresolved_infections" -gt 0 ]; then
-        infection_factor=35  # Critical - unresolved threats
+        infection_factor=35
         factor_explanations+=("Unresolved infections: +35 points (CRITICAL)")
     elif [ "$resolved_infections" -gt 0 ]; then
-        infection_factor=$((resolved_infections * 5))  # 5 points per resolved infection
-        if [ "$infection_factor" -gt 15 ]; then infection_factor=15; fi  # Cap at 15
+        infection_factor=$((resolved_infections * 5))
+        if [ "$infection_factor" -gt 15 ]; then infection_factor=15; fi
         factor_explanations+=("Resolved infections: +${infection_factor} points")
     fi
     threat_score=$((threat_score + infection_factor))
     local service_factor=0
     if [ "$clamav_running" = false ] || [ "$freshclam_running" = false ]; then
-        service_factor=25  # Critical - services down
+        service_factor=25
         factor_explanations+=("Service issues: +25 points (services down)")
     fi
     threat_score=$((threat_score + service_factor))
     local db_factor=0
     if [ "$database_errors" -gt 0 ]; then
-        db_factor=20  # Critical - database corrupted
+        db_factor=20
         factor_explanations+=("Database errors: +20 points (database corrupted)")
     elif [ -n "$database_age_days" ] && [[ "$database_age_days" =~ ^[0-9]+$ ]] && [ "$database_age_days" -gt 7 ]; then
-        db_factor=15  # High - outdated signatures
+        db_factor=15
         factor_explanations+=("Outdated database: +15 points (${database_age_days} days old)")
-    elif [ "$updates" -eq 0 ] && [ "$database_reloads" -eq 0 ] && [ -n "$database_age_days" ] && [[ "$database_age_days" =~ ^[0-9]+$ ]] && [ "$database_age_days" -gt 1 ]; then
-        db_factor=10  # Medium - no recent activity
+    elif [ "$updates" -eq 0 ] && [ "$database_reloads" -eq 0 ] && [ -n "$database_age_days" ] && [[ "$database_age_days" =~ ^[0-9]+$ ]] && [ "$database_age_days" -gt 3 ]; then
+        db_factor=10
         factor_explanations+=("No database activity: +10 points (${database_age_days} days old)")
     fi
     threat_score=$((threat_score + db_factor))
     local scan_factor=0
-    if [ "$scans" -eq 0 ]; then
-        scan_factor=10  # No scans performed today
-        factor_explanations+=("No scans today: +10 points")
-    elif [ "$scan_performance_issues" -eq 1 ]; then
-        scan_factor=5  # Performance issues
+    if [ "$scan_performance_issues" -eq 1 ]; then
+        scan_factor=5
         factor_explanations+=("Scan performance issues: +5 points")
     fi
     threat_score=$((threat_score + scan_factor))
     local quarantine_factor=0
     if [ -n "$quarantine_files" ] && [[ "$quarantine_files" =~ ^[0-9]+$ ]] && [ "$quarantine_files" -gt 100 ]; then
-        quarantine_factor=10  # High quarantine load
+        quarantine_factor=10
         factor_explanations+=("High quarantine load: +10 points (${quarantine_files} files)")
     elif [ -n "$quarantine_files" ] && [[ "$quarantine_files" =~ ^[0-9]+$ ]] && [ "$quarantine_files" -gt 20 ]; then
-        quarantine_factor=5  # Medium quarantine load
+        quarantine_factor=5
         factor_explanations+=("Medium quarantine load: +5 points (${quarantine_files} files)")
     fi
     threat_score=$((threat_score + quarantine_factor))
@@ -2437,7 +2502,6 @@ check_backup_status() {
     
     echo -e "Processing backup logs... This may take a few moments."
     
-    # Check if backup.log exists (most recent backup log)
     if [ ! -f "$backup_log" ]; then
         backup_status="${RED}⚠️  Main backup log file not found: $backup_log${NC}"
             ((high_issues++))
@@ -2445,7 +2509,6 @@ check_backup_status() {
             return 1
         fi
     
-    # Read backup.log content
     local log_content=$(run_with_timeout 15 "cat '$backup_log' 2>/dev/null | tr -d '\0'")
     local log_exit_code=$?
     if [ $log_exit_code -ne 0 ]; then
@@ -2455,7 +2518,6 @@ check_backup_status() {
         return 1
     fi
             
-    # Extract last backup date from log
     local last_backup_date=""
     local backup_start_line=$(echo "$log_content" | grep -n "Directory /backup cleaned before starting" | tail -1 | cut -d: -f1)
     if [ -n "$backup_start_line" ]; then
@@ -2465,7 +2527,6 @@ check_backup_status() {
         fi
     fi
             
-    # Analyze backup issues from log
     local critical_errors=0
     local medium_errors=0
     local warnings=0
@@ -2475,7 +2536,6 @@ check_backup_status() {
     local small_files=()
     local disk_warnings=()
             
-    # Critical errors detection
         while IFS= read -r line; do
         if [[ "$line" =~ "Error creating backup for user" ]]; then
             local user=$(echo "$line" | sed -n 's/.*Error creating backup for user \([^ ]*\).*/\1/p')
@@ -2516,7 +2576,6 @@ check_backup_status() {
         fi
     done <<< "$log_content"
             
-    # Check backup summary if available
     local overall_status=""
     local summary_successful_users=()
     local summary_failed_users=()
@@ -2526,7 +2585,6 @@ check_backup_status() {
         if [ $? -eq 0 ] && [ -n "$summary_content" ]; then
             overall_status=$(echo "$summary_content" | grep "Overall Status:" | sed 's/.*Overall Status: //')
                     
-            # Extract successful users
             local in_success_section=0
             local in_failed_section=0
         while IFS= read -r line; do
@@ -2559,7 +2617,6 @@ check_backup_status() {
         fi
     fi
             
-    # Determine backup status and severity
     if [ -z "$last_backup_date" ]; then
         backup_status="${YELLOW}⚠️  Could not determine last backup date from log${NC}"
         ((medium_errors++))
@@ -2595,7 +2652,6 @@ check_backup_status() {
             fi
         fi
                 
-        # Check if backup is too old
         if [ $days_since_backup -gt 7 ]; then
             backup_status="${YELLOW}⚠️  Warning: Last backup was $days_since_backup days ago${NC}"
                 ((low_issues++))
@@ -2603,7 +2659,6 @@ check_backup_status() {
             fi
     fi
             
-    # Build detailed issues report
     if [ $critical_errors -gt 0 ] || [ ${#summary_failed_users[@]} -gt 0 ]; then
         detailed_issues="<h3 style='color: #dc3545;'>💾 Backup System - Critical Issues</h3><ul style='margin: 10px 0; padding-left: 20px;'>"
                 
@@ -2641,10 +2696,9 @@ check_backup_status() {
         fi
     fi
             
-    # Build backup details for detailed_report
     local backup_details="Last backup: ${last_backup_date:-'Unknown'}"
     local health_level="EXCELLENT"
-    local health_score=95
+    local health_score=100
     
     if [ -n "$overall_status" ]; then
         backup_details+=", Status: $overall_status"
@@ -2669,7 +2723,7 @@ declare -g myvesta_failed=0
 declare -g myvesta_bans=0
 check_failed_logins() {
     local nginx_log="/var/log/vesta/nginx-access.log"
-    local auth_log="/usr/local/vesta/log/auth.log"  # Caminho correto do auth.log do Vesta
+    local auth_log="/usr/local/vesta/log/auth.log"
     local fail2ban_log="/var/log/fail2ban.log"
     local total_attempts=0
     local failed_attempts=0
@@ -2706,9 +2760,9 @@ check_failed_logins() {
     myvesta_failed=$failed_attempts
     myvesta_bans=$banned_ips
     if [ "$total_attempts" -gt 0 ]; then
-        service_attempts["MyVestacpPanel"]=$failed_attempts  # Use failed attempts instead of total attempts
+        service_attempts["MyVestacpPanel"]=$failed_attempts
         service_bans["MyVestacpPanel"]=$banned_ips
-        service_unbans["MyVestacpPanel"]=$banned_ips  # Unbans should match bans for MyVestacpPanel
+        service_unbans["MyVestacpPanel"]=$banned_ips
     fi
 }
 process_ip_statistics() {
@@ -2751,7 +2805,7 @@ process_ip_statistics() {
             fi
         fi
     done <<< "$log_content"
-    echo -e "\n" # Add newline after progress bar
+    echo -e "\n"
     echo "Debug: ip_bans contents: ${!ip_bans[@]}"
     for ip in "${!ip_bans[@]}"; do
         echo "IP: $ip, Bans: ${ip_bans[$ip]}"
@@ -2801,18 +2855,18 @@ check_fail2ban_status() {
         local total_bans_today=0
         local total_unbans_today=0
         local total_currently_banned=0
-        local total_all_attempts=0  # Track total attempts including from banned IPs
+        local total_all_attempts=0
         local today_log_content=$(grep "^$today" "$fail2ban_log" 2>/dev/null)
         echo -e "\n${YELLOW}Activity by Service (Today Only):${NC}"
         local ssh_attempts_counted=false
         local ssh_total_attempts=0
         for jail in $jails; do
             if [ -n "$jail" ]; then
-                local jail_name=$(echo "$jail" | xargs)  # Remove whitespace
+                local jail_name=$(echo "$jail" | xargs)
                 local skip_jail=false
                 if [[ "$jail_name" == *"sshd"* ]] && [ "$ssh_attempts_counted" = true ]; then
                     skip_jail=true
-                    continue  # Skip this jail completely
+                    continue
                 elif [[ "$jail_name" == *"ssh"* ]] && [[ "$jail_name" != *"sshd"* ]]; then
                     ssh_attempts_counted=true
                 fi
@@ -2820,11 +2874,10 @@ check_fail2ban_status() {
                     continue
                 fi
                 local today_failed=0
-                local today_new_threats=0  # Count based on new bans (most accurate for real threats)
+                local today_new_threats=0
                 declare -A banned_ips_jail
                 local jail_log_lines=$(echo "$today_log_content" | grep "\[$jail_name\]")
                 
-                # Simple and direct: just count the actual log entries
                 while IFS= read -r log_line; do
                     if [[ "$log_line" =~ Found[[:space:]]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
                             today_failed=$((today_failed + 1))
@@ -2853,7 +2906,7 @@ check_fail2ban_status() {
                 echo -e "    * Bans today: $today_banned"
                 echo -e "    * Unbans today: $today_unbanned"
                 echo -e "    * Currently banned: $currently_banned"
-                total_attempts_today=$((total_attempts_today + today_new_threats))  # Use new threats only
+                total_attempts_today=$((total_attempts_today + today_new_threats)) 
                 total_bans_today=$((total_bans_today + today_banned))
                 total_unbans_today=$((total_unbans_today + today_unbanned))
                 total_currently_banned=$((total_currently_banned + currently_banned))
@@ -2870,14 +2923,11 @@ check_fail2ban_status() {
         fi
         echo -e "${GREEN}✓ Today's data collected successfully.${NC}"
         
-        # Calculate stats for summary
         local unique_attacking_ips=$(echo "$today_log_content" | grep "Found " | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | sort -u | wc -l)
         local unique_banned_ips=$(echo "$today_log_content" | grep "Ban " | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | sort -u | wc -l)
         
-        # Simple threat scoring based on actual activity volume
-        local threat_score=100  # Start with perfect score
+        local threat_score=100
         
-        # Subtract points based on attack volume (realistic thresholds)
         if [ $total_all_attempts -gt 100000 ]; then
             threat_score=$((threat_score - 30))
         elif [ $total_all_attempts -gt 50000 ]; then
@@ -2890,10 +2940,8 @@ check_fail2ban_status() {
             threat_score=$((threat_score - 5))
         fi
         
-        # Ensure score doesn't go below 0
         [ $threat_score -lt 0 ] && threat_score=0
         
-        # Determine threat level based on final score
         if [ $threat_score -ge 90 ]; then
             threat_level="EXCELLENT"
             threat_color="${GREEN}"
@@ -2960,7 +3008,6 @@ check_fail2ban_status() {
                                     "dovecot") jail="dovecot" ;;
                                     "vesta") jail="vesta" ;;
                                 esac
-                                # Check if service is already in the services string to avoid duplicates
                                 if [ -z "$services" ]; then
                                     services="$jail"
                                 elif ! echo "$services" | grep -q "\b$jail\b"; then
@@ -3119,6 +3166,7 @@ show_config_status() {
     [ "$CHECK_MYVESTACP_SERVICES" = true ] && echo -e "Vesta Services: ${GREEN}Enabled${NC}" || echo -e "Vesta Services: ${RED}Disabled${NC}"
     [ "$CHECK_PHP" = true ] && echo -e "PHP Status: ${GREEN}Enabled${NC}" || echo -e "PHP Status: ${RED}Disabled${NC}"
     [ "$CHECK_MYSQL" = true ] && echo -e "MySQL Status: ${GREEN}Enabled${NC}" || echo -e "MySQL Status: ${RED}Disabled${NC}"
+    [ "$CHECK_MYSQL_COMMANDS" = true ] && echo -e "MySQL Commands: ${GREEN}Enabled${NC}" || echo -e "MySQL Commands: ${RED}Disabled${NC}"
     [ "$CHECK_CLAMAV" = true ] && echo -e "ClamAV Status: ${GREEN}Enabled${NC}" || echo -e "ClamAV Status: ${RED}Disabled${NC}"
     [ "$CHECK_FAIL2BAN" = true ] && echo -e "Fail2Ban Status: ${GREEN}Enabled${NC}" || echo -e "Fail2Ban Status: ${RED}Disabled${NC}"
     [ "$CHECK_FAIL2BAN_CONFIG" = true ] && echo -e "Fail2Ban Configuration Display: ${GREEN}Enabled${NC}" || echo -e "Fail2Ban Configuration Display: ${RED}Disabled${NC}"
@@ -3136,6 +3184,7 @@ handle_args() {
                 CHECK_MYVESTACP_SERVICES=true
                 CHECK_PHP=true
                 CHECK_MYSQL=true
+                CHECK_MYSQL_COMMANDS=true
                 CHECK_CLAMAV=true
                 CHECK_FAIL2BAN=true
                 CHECK_EXIM4=true
@@ -3147,6 +3196,7 @@ handle_args() {
                 CHECK_MYVESTACP_SERVICES=false
                 CHECK_PHP=false
                 CHECK_MYSQL=false
+                CHECK_MYSQL_COMMANDS=false
                 CHECK_CLAMAV=false
                 CHECK_FAIL2BAN=false
                 CHECK_EXIM4=false
@@ -3160,6 +3210,7 @@ handle_args() {
                     myvestacp-services) CHECK_MYVESTACP_SERVICES=true ;;
                     php) CHECK_PHP=true ;;
                     mysql) CHECK_MYSQL=true ;;
+                    mysql-commands) CHECK_MYSQL_COMMANDS=true ;;
                     clamav) CHECK_CLAMAV=true ;;
                     fail2ban) CHECK_FAIL2BAN=true ;;
                     email) CHECK_EXIM4=true ;;
@@ -3175,6 +3226,7 @@ handle_args() {
                     myvestacp-services) CHECK_MYVESTACP_SERVICES=false ;;
                     php) CHECK_PHP=false ;;
                     mysql) CHECK_MYSQL=false ;;
+                    mysql-commands) CHECK_MYSQL_COMMANDS=false ;;
                     clamav) CHECK_CLAMAV=false ;;
                     fail2ban) CHECK_FAIL2BAN=false ;;
                     email) CHECK_EXIM4=false ;;
@@ -3195,6 +3247,7 @@ handle_args() {
                 echo -e "  myvestacp-services"
                 echo -e "  php"
                 echo -e "  mysql"
+                echo -e "  mysql-commands"
                 echo -e "  clamav"
                 echo -e "  fail2ban"
                 echo -e "  email"
@@ -3478,7 +3531,7 @@ send_email_report() {
         if [[ -n "$health_level" && -n "$score" ]]; then
             email_content+="Health Level: $health_level (Score: $score/100)"
         fi
-        description=""  # Clear description for cleaner email display
+        description=""  
         email_content+="$description</div>
 "
         email_content+="</div>"
@@ -3734,58 +3787,57 @@ declare -a medium_modules_found=()
 declare -a low_modules_found=()
 declare -A detailed_report=()
 
-# Arrays for organizing detailed issues by severity (for email ordering)
 declare -a CRITICAL_ISSUES_EMAIL=()
 declare -a HIGH_ISSUES_EMAIL=()  
 declare -a MEDIUM_ISSUES_EMAIL=()
 declare -a LOW_ISSUES_EMAIL=()
 if [ "$CHECK_SYSTEM_RESOURCES" = true ]; then
     if ! run_check "System Resources" check_resources; then
-        : # Issue already counted within the function
+        : 
     fi
 fi
 if [ "$CHECK_MYVESTACP_SERVICES" = true ]; then
     if ! run_check "MyVestaCP Services" check_myvestacp_services; then
-         : # Issue already counted within the function
+        : 
     fi
 fi
 if [ "$CHECK_PHP" = true ]; then
     if ! run_check "PHP Status" check_php_status; then
-         : # Issue already counted within the function
+        : 
     fi
 fi
 if [ "$CHECK_MYSQL" = true ]; then
     if ! run_check "MySQL Status" check_mysql_status; then
-         : # Issue already counted within the function
+        : 
     fi
 fi
 if [ "$CHECK_CLAMAV" = true ]; then
     if ! run_check "ClamAV Status" check_clamav_status; then
-         : # Issue already counted within the function
+        : 
     fi
 fi
 if [ "$CHECK_FAIL2BAN" = true ]; then
     if ! run_check "Fail2Ban Status" check_fail2ban_status; then
-         : # Issue already counted within the function
+        : 
     fi
 fi
 echo -e "\n${BLUE}Checking last 24 hours of activity...${NC}"
 if [ "$CHECK_EXIM4" = true ]; then
     if ! run_check "EXIM4 Status" check_email_status; then
-         : # Issue already counted within the function
+        : 
     fi
 fi
 if [ "$CHECK_SSL" = true ]; then
     if ! run_check "SSL Status" check_ssl_status; then
-         : # Issue already counted within the function
+        : 
     fi
 fi
 if [ "$CHECK_BACKUP" = true ]; then
     if ! run_check "Backup Status" check_backup_status; then
-         : # Issue already counted within the function
+        : 
+    else
+        backup_status="${YELLOW}⚠️  Backup check disabled${NC}"
     fi
-else
-    backup_status="${YELLOW}⚠️  Backup check disabled${NC}"
 fi
 myvestacp_version=$(run_with_timeout 5 "cat /usr/local/vesta/version.txt 2>/dev/null")
 myvestacp_build_date=$(run_with_timeout 5 "cat /usr/local/vesta/build_date.txt 2>/dev/null")
@@ -3827,7 +3879,6 @@ echo -e "$backup_status"
 echo -e "
 ${BLUE}=== System Health Summary ===${NC}"
 
-# Clean up disabled modules from detailed_report before health analysis
 [ "$CHECK_SYSTEM_RESOURCES" = false ] && unset detailed_report["system_resources"] detailed_report["resources"]
 [ "$CHECK_MYVESTACP_SERVICES" = false ] && unset detailed_report["services"]
 [ "$CHECK_PHP" = false ] && unset detailed_report["php"]
@@ -3923,7 +3974,6 @@ fi
 echo -e "
 ${BLUE}=== Sending Email Report ===${NC}"
 if [ "$SEND_EMAIL_REPORT" = true ]; then
-    # Consolidate detailed issues by severity order: Critical → High → Medium → Low
     DETAILED_ISSUES_EMAIL=""
     for issue in "${CRITICAL_ISSUES_EMAIL[@]}"; do
         DETAILED_ISSUES_EMAIL+="$issue"
