@@ -848,6 +848,10 @@ check_email_status() {
         if [ -n "$queue_sample" ]; then
             delivery_errors=$(echo "$queue_sample" | grep -c "retry time not reached\|Connection refused\|Host not found" || echo 0)
             auth_failures=$(echo "$queue_sample" | grep -c "authentication failed\|login failed" || echo 0)
+            
+            delivery_errors=$(echo "$delivery_errors" | tr -d '\n\r' | grep -o '^[0-9]*$' || echo 0)
+            auth_failures=$(echo "$auth_failures" | tr -d '\n\r' | grep -o '^[0-9]*$' || echo 0)
+            
             if [ "$delivery_errors" -gt 5 ]; then
                 output+=("${YELLOW}⚠️  Delivery issues detected in queue: $delivery_errors${NC}")
                 recent_failures=$delivery_errors
