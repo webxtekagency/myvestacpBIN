@@ -38,6 +38,10 @@ DETAILED_ISSUES_HTML=""
 AI_LAST_ERROR=""
 DETAILED_ISSUES_EMAIL=""
 
+# Global variables for health tracking
+declare -A module_health_level
+declare -A module_health_score
+
 
 setup_logging() {
     if [ ! -d "$LOG_DIR" ]; then
@@ -655,6 +659,8 @@ check_resources() {
         local mem_usage=$(run_with_timeout 5 "free | awk '/Mem:/ {print int(\$3/\$2 * 100)}'")
         local disk_usage=$(run_with_timeout 5 "df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'")
         local cpu_cores=$(run_with_timeout 5 "nproc")
+        module_health_score["system_resources"]=75
+        module_health_level["system_resources"]="FAIR"
         detailed_report["system_resources"]="Load Average: $load_avg (CPU cores: $cpu_cores), CPU Usage: ${cpu_usage}%, Memory Usage: ${mem_usage}%, Disk Usage: ${disk_usage}%"
         return 1
     else
@@ -663,6 +669,8 @@ check_resources() {
         local mem_usage=$(run_with_timeout 5 "free | awk '/Mem:/ {print int(\$3/\$2 * 100)}'")
         local disk_usage=$(run_with_timeout 5 "df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'")
         local cpu_cores=$(run_with_timeout 5 "nproc")
+        module_health_score["system_resources"]=100
+        module_health_level["system_resources"]="EXCELLENT"
         detailed_report["system_resources"]="Load Average: $load_avg (CPU cores: $cpu_cores), CPU Usage: ${cpu_usage}%, Memory Usage: ${mem_usage}%, Disk Usage: ${disk_usage}% - All within normal ranges"
         return 0
     fi
@@ -754,7 +762,9 @@ check_myvestacp_services() {
     else
         services_details="All MyVestaCP services running normally"
     fi
-    detailed_report["services"]="$services_details"
+    module_health_score["services"]=$health_score
+    module_health_level["services"]=$health_level
+    detailed_report["services"]="Health Level: $health_level Score: $health_score | $services_details"
     if [ $((current_high_issues + current_medium_issues)) -gt 0 ]; then
         return 1
     else
@@ -923,6 +933,8 @@ check_email_status() {
         frozen_msgs=$(echo "$frozen_msgs" | tr -d '\n\r' | grep -o '^[0-9]*$' || echo 0)
         smtp_connections=$(echo "$smtp_connections" | tr -d '\n\r' | grep -o '^[0-9]*$' || echo 0)
         relay_attempts=$(echo "$relay_attempts" | tr -d '\n\r' | grep -o '^[0-9]*$' || echo 0)
+        # Calculate legitimate delivery attempts (excluding security blocks)
+        local legitimate_attempts=$((delivered_count + bounced_count + deferred_count))
         local total_attempts=$((delivered_count + bounced_count + deferred_count + rejected_count))
         output+=("${GREEN}✓ Delivered today: $delivered_count${NC}")
         recent_deliveries=$delivered_count
@@ -969,8 +981,9 @@ check_email_status() {
         if [ "$smtp_connections" -gt 20 ]; then
             output+=("${BLUE}ℹ️  SMTP connections: $smtp_connections${NC}")
         fi
-        if [ "$total_attempts" -gt 0 ]; then
-            local success_rate=$(( (delivered_count * 100) / total_attempts ))
+        if [ "$legitimate_attempts" -gt 0 ]; then
+            # Calculate success rate based on legitimate attempts only
+            local success_rate=$(( (delivered_count * 100) / legitimate_attempts ))
             if [ "$success_rate" -lt 50 ]; then
                 output+=("${RED}Delivery success rate: ${success_rate}% ⚠️  Low${NC}")
                 recent_failures=$((recent_failures + 5))
@@ -979,6 +992,12 @@ check_email_status() {
                 recent_failures=$((recent_failures + 2))
             else
                 output+=("${GREEN}Delivery success rate: ${success_rate}% ✓ Good${NC}")
+            fi
+            
+            # Add a note about security blocks if there's a significant difference
+            if [ "$rejected_count" -gt 10 ] && [ "$total_attempts" -gt "$legitimate_attempts" ]; then
+                local security_block_rate=$(( (rejected_count * 100) / total_attempts ))
+                output+=("${GREEN}✓ Security blocks: ${security_block_rate}% of all mail traffic (good)${NC}")
             fi
         else
             output+=("${BLUE}ℹ️  No delivery attempts today${NC}")
@@ -1020,13 +1039,24 @@ check_email_status() {
         factor_explanations+=("Moderate queue: +10 points (${queue_count} messages)")
     fi
     threat_score=$((threat_score + queue_factor))
+    # Calculate legitimate delivery attempts and success rate
+    local legitimate_attempts=$((delivered_count + bounced_count + deferred_count))
+    local success_rate=0
+    if [ "$legitimate_attempts" -gt 0 ]; then
+        success_rate=$(( (delivered_count * 100) / legitimate_attempts ))
+    fi
+    
     local failure_factor=0
-    if [ "$recent_failures" -gt 50 ]; then
+    # Only consider it a failure issue if the success rate is low for legitimate attempts
+    if [ "$success_rate" -lt 50 ] && [ "$legitimate_attempts" -gt 10 ]; then
         failure_factor=20
-        factor_explanations+=("High recent failures: +20 points (${recent_failures} failures)")
-    elif [ "$recent_failures" -gt 30 ]; then
+        factor_explanations+=("Low delivery success rate: +20 points (${success_rate}% success rate)")
+    elif [ "$success_rate" -lt 75 ] && [ "$legitimate_attempts" -gt 10 ]; then
         failure_factor=10
-        factor_explanations+=("Recent failures: +10 points (${recent_failures} failures)")
+        factor_explanations+=("Moderate delivery success rate: +10 points (${success_rate}% success rate)")
+    elif [ "$recent_failures" -gt 30 ]; then
+        failure_factor=5
+        factor_explanations+=("Recent failures: +5 points (${recent_failures} failures)")
     fi
     threat_score=$((threat_score + failure_factor))
     local config_factor=0
@@ -1035,13 +1065,17 @@ check_email_status() {
         factor_explanations+=("Configuration issues: +15 points")
     fi
     threat_score=$((threat_score + config_factor))
+    # Don't penalize for auth failures as much - these are security features working correctly
     local auth_factor=0
-    if [ "$auth_failures" -gt 500 ]; then
-        auth_factor=10
-        factor_explanations+=("Very high auth failures: +10 points (${auth_failures} failures)")
-    elif [ "$auth_failures" -gt 200 ]; then
+    if [ "$auth_failures" -gt 10000 ]; then
         auth_factor=5
-        factor_explanations+=("High auth failures: +5 points (${auth_failures} failures)")
+        factor_explanations+=("Extremely high auth failures: +5 points (${auth_failures} failures)")
+    elif [ "$auth_failures" -gt 5000 ]; then
+        auth_factor=2
+        factor_explanations+=("Very high auth failures: +2 points (${auth_failures} failures)")
+    elif [ "$auth_failures" -gt 1000 ]; then
+        auth_factor=1
+        factor_explanations+=("High auth failures: +1 point (${auth_failures} failures)")
     fi
     threat_score=$((threat_score + auth_factor))
     local health_score=$((100 - threat_score))
@@ -1063,6 +1097,8 @@ check_email_status() {
         email_health_level="CRITICAL"
         health_color="${RED}"
     fi
+    module_health_score["email"]=$health_score
+    module_health_level["email"]=$email_health_level
     current_high_issues=0
     current_medium_issues=0
     current_low_issues=0
@@ -1076,6 +1112,7 @@ check_email_status() {
     output+=("")
     output+=("${health_color}Health Level: $email_health_level (Score: ${health_score}/100)${NC}")
     printf "%b\n" "${output[@]}"
+    
     ((high_issues+=current_high_issues))
     ((medium_issues+=current_medium_issues))
     ((low_issues+=current_low_issues))
@@ -1128,7 +1165,7 @@ check_email_status() {
         fi
         email_details="Health Level: $email_health_level (Score: ${health_score}/100) - EXIM4 system functioning optimally: services running, $performance_info$additional_info, no critical issues detected"
     fi
-    detailed_report["email"]="$email_details"
+    detailed_report["email"]="${module_health_level["email"]} health: Score ${module_health_score["email"]}/100 - ${email_details#*-}"
     if [ $((current_high_issues + current_medium_issues + current_low_issues)) -gt 0 ]; then
         return 1
     else
@@ -1326,6 +1363,8 @@ check_ssl_status() {
         health_color="${RED}"
         ((current_high_issues++))
     fi
+    module_health_score["ssl"]=$health_score
+    module_health_level["ssl"]=$ssl_health_level
     echo -e "\n${health_color}Health Level: $ssl_health_level (Score: ${health_score}/100)${NC}"
     if [ "$total_certificates" -gt 0 ]; then
         echo -e "✓ $total_certificates SSL certificates analyzed"
@@ -1725,6 +1764,8 @@ check_php_status() {
         health_color="${RED}"
         ((current_high_issues++))
     fi
+    module_health_score["php"]=$health_score
+    module_health_level["php"]=$php_health_level
     echo -e "${health_color}Health Level: $php_health_level (Score: ${health_score}/100)${NC}"
     if [ ${#php_versions[@]} -eq 1 ]; then
         echo -e "✓ PHP ${php_versions[0]} analyzed"
@@ -2024,6 +2065,8 @@ ${YELLOW}Analyzing logs for additional context...${NC}"
         health_color="${RED}"
         ((current_high_issues++))
     fi
+    module_health_score["mysql"]=$health_score
+    module_health_level["mysql"]=$mysql_health_level
     echo -e "${health_color}Health Level: $mysql_health_level (Score: ${health_score}/100)${NC}"
     if [ -n "$mysql_service" ]; then
         echo -e "✓ $mysql_service service analyzed"
@@ -2404,6 +2447,8 @@ check_clamav_status() {
         current_low_issues=1
     fi
     output+=("")
+    module_health_score["clamav"]=$health_score
+    module_health_level["clamav"]=$clamav_threat_level
     output+=("${health_color}Health Level: $clamav_threat_level (Score: ${health_score}/100)${NC}")
     if [ "$infections" -gt 0 ] 2>/dev/null; then
         if [ "$unresolved_infections" -gt 0 ]; then
@@ -2719,6 +2764,8 @@ check_backup_status() {
         health_score=70
     fi
     
+    module_health_score["backup"]=$health_score
+    module_health_level["backup"]=$health_level
     detailed_report["backup"]="Health Level: $health_level Score: $health_score | $backup_details"
     return 0
 }
@@ -2964,6 +3011,9 @@ check_fail2ban_status() {
         fi
         
         local health_score=$threat_score
+        
+        module_health_score["fail2ban"]=$health_score
+        module_health_level["fail2ban"]=$threat_level
         
         echo -e "\n${YELLOW}Today's Summary ($today):${NC}"
         echo -e "  * Total attempts today: $total_all_attempts"
@@ -3420,11 +3470,22 @@ send_email_report() {
         local score=""
         local bg_color="#f8fff9"
         local border_color="#28a745"
-        if [[ $description =~ Health[[:space:]]+Level:[[:space:]]*([A-Z]+) ]]; then
+        
+        local module_key=""
+        case "$key" in
+            "exim4") module_key="email" ;;
+            "resources") module_key="system_resources" ;;
+            *) module_key="$key" ;;
+        esac
+        
+        if [[ -n "${module_health_level[$module_key]}" && -n "${module_health_score[$module_key]}" ]]; then
+            health_level="${module_health_level[$module_key]}"
+            score="${module_health_score[$module_key]}"
+        elif [[ $description =~ Health[[:space:]]+Level:[[:space:]]*([A-Z]+) ]]; then
             health_level=${BASH_REMATCH[1]}
-        fi
-        if [[ $description =~ Score:[[:space:]]*([0-9]+) ]]; then
-            score=${BASH_REMATCH[1]}
+            if [[ $description =~ Score:[[:space:]]*([0-9]+) ]]; then
+                score=${BASH_REMATCH[1]}
+            fi
         fi
         if [[ "$health_level" != "EXCELLENT" ]]; then
             case "$key" in
@@ -3535,19 +3596,18 @@ send_email_report() {
         if [[ -n "$health_level" && -n "$score" ]]; then
             email_content+="Health Level: $health_level (Score: $score/100)"
         fi
-        description=""  
-        email_content+="$description</div>
+        email_content+="</div>
 "
         email_content+="</div>"
     }
     if [ ${#detailed_report[@]} -gt 0 ]; then
-        [ "$CHECK_SYSTEM_RESOURCES" = true ] && add_module_to_email "resources" "🖥️" "System Resources" "${detailed_report[resources]}"
+        [ "$CHECK_SYSTEM_RESOURCES" = true ] && add_module_to_email "resources" "🖥️" "System Resources" "${detailed_report[system_resources]}"
         [ "$CHECK_MYVESTACP_SERVICES" = true ] && add_module_to_email "services" "⚙️" "MyVestaCP Services" "${detailed_report[services]}"
         [ "$CHECK_PHP" = true ] && add_module_to_email "php" "🐘" "PHP-FPM" "${detailed_report[php]}"
         [ "$CHECK_MYSQL" = true ] && add_module_to_email "mysql" "🗄️" "MySQL Database" "${detailed_report[mysql]}"
         [ "$CHECK_CLAMAV" = true ] && add_module_to_email "clamav" "🦠" "ClamAV Antivirus" "${detailed_report[clamav]}"
         [ "$CHECK_FAIL2BAN" = true ] && add_module_to_email "fail2ban" "🛡️" "Fail2Ban Security" "${detailed_report[fail2ban]}"
-        [ "$CHECK_EXIM4" = true ] && add_module_to_email "exim4" "📧" "EXIM4 System" "${detailed_report[exim4]}"
+        [ "$CHECK_EXIM4" = true ] && add_module_to_email "exim4" "📧" "EXIM4 System" "${detailed_report[email]}"
         [ "$CHECK_SSL" = true ] && add_module_to_email "ssl" "🔒" "SSL Certificates" "${detailed_report[ssl]}"
         [ "$CHECK_BACKUP" = true ] && add_module_to_email "backup" "💾" "Backup System" "${detailed_report[backup]}"
     else
@@ -3889,7 +3949,7 @@ ${BLUE}=== System Health Summary ===${NC}"
 [ "$CHECK_MYSQL" = false ] && unset detailed_report["mysql"]
 [ "$CHECK_CLAMAV" = false ] && unset detailed_report["clamav"]
 [ "$CHECK_FAIL2BAN" = false ] && unset detailed_report["fail2ban"]
-[ "$CHECK_EXIM4" = false ] && unset detailed_report["email"] detailed_report["exim4"]
+[ "$CHECK_EXIM4" = false ] && unset detailed_report["email"]
 [ "$CHECK_SSL" = false ] && unset detailed_report["ssl"]
 [ "$CHECK_BACKUP" = false ] && unset detailed_report["backup"]
 
